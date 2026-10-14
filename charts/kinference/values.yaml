@@ -8,6 +8,7 @@ replicaCount: 1
 strategyType: Recreate
 
 image:
+  repository: cr.kinference.ai/buoyantio/kinference
   repository: ghcr.io/buoyantio/kinference
   # Defaults to the chart's appVersion.
   tag: ""
