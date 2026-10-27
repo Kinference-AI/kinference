@@ -364,11 +364,6 @@ impl KinferenceService {
                     side: score_side,
                 }),
                 ScoreOutcome::Unavailable(resp, why) => {
-                    tracing::warn!(
-                        pool = %first.name,
-                        reason = why.as_label(),
-                        "pick: no prefix-cache signal; picking on load metrics only"
-                    );
                     self.prom.record_score_degraded(why.as_label());
                     degraded = Some(why.reason().to_string());
                     groups.push(ScoredGroup {

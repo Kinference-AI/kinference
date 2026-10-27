@@ -49,6 +49,7 @@ use futures::future::BoxFuture;
 use super::{TokenizeInput, TokenizeOutcome, TokenizeRequest};
 use crate::error::Error;
 use crate::metrics::RouterMetrics;
+use crate::warn_once::WarnOnce;
 use kinference_fleet::models::ModelClaim;
 use kinference_fleet::pool::{Pool, PoolRegistry};
 use kinference_fleet::profile::TokenizeMode;
@@ -126,9 +127,8 @@ pub struct LocalTokenizer {
     /// Concurrent first-loads of a model aren't deduplicated (only one
     /// result is kept), so without this each would log.
     hub_fallback_logged: DashMap<String, ()>,
-    /// Warn-once latch per model, since some models fail locally on every
-    /// request.
-    warn_latch: DashMap<String, ()>,
+    /// Models that fail locally, so each logs once.
+    failed: WarnOnce<String>,
     http: Arc<HttpRender>,
     prom: Arc<RouterMetrics>,
 }
@@ -152,7 +152,7 @@ impl LocalTokenizer {
             config,
             hub,
             hub_fallback_logged: DashMap::new(),
-            warn_latch: DashMap::new(),
+            failed: WarnOnce::default(),
             http,
             prom,
         })
@@ -223,7 +223,7 @@ impl LocalTokenizer {
                 TokenizeOutcome::Ok(tokens)
             }
             Err(e) => {
-                if self.warn_latch.insert(model.to_string(), ()).is_none() {
+                if self.failed.first(model) {
                     tracing::warn!(
                         model,
                         error = &e as &dyn std::error::Error,

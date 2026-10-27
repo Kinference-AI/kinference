@@ -101,12 +101,6 @@ impl HttpRender {
                 }
                 Err(e) => {
                     let err = e.chain();
-                    tracing::warn!(
-                        tokenize_url = url,
-                        render_ms = format_args!("{render_ms:.1}"),
-                        error = %err,
-                        "render via the worker set's render_url failed; failing fast (no per-worker fallback)"
-                    );
                     return TokenizeOutcome::Unavailable {
                         reason: format!("render_url={url} failed: {err}"),
                         attempts: 1,

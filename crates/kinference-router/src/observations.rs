@@ -11,6 +11,7 @@
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -524,6 +525,8 @@ pub fn format_csv_row(
 /// - Every row is flushed.
 pub struct ObservationSink {
     inner: Option<Mutex<BufWriter<std::fs::File>>>,
+    /// Whether the last write failed, so a failing sink logs once.
+    failing: AtomicBool,
 }
 
 impl ObservationSink {
@@ -531,7 +534,7 @@ impl ObservationSink {
     /// startup by `Config::load`); see the type docs for the cases.
     pub(crate) fn open(path: Option<PathBuf>) -> Self {
         let Some(path) = path else {
-            return Self { inner: None };
+            return Self::with(None);
         };
         match OpenOptions::new().create(true).append(true).open(&path) {
             Ok(f) => {
@@ -564,9 +567,7 @@ impl ObservationSink {
                         "observation sink enabled (appending to existing file)"
                     );
                 }
-                Self {
-                    inner: Some(Mutex::new(writer)),
-                }
+                Self::with(Some(Mutex::new(writer)))
             }
             Err(e) => {
                 tracing::warn!(
@@ -574,8 +575,15 @@ impl ObservationSink {
                     error = %e,
                     "failed to open observation sink; CSV disabled"
                 );
-                Self { inner: None }
+                Self::with(None)
             }
+        }
+    }
+
+    fn with(inner: Option<Mutex<BufWriter<std::fs::File>>>) -> Self {
+        Self {
+            inner,
+            failing: AtomicBool::new(false),
         }
     }
 
@@ -585,16 +593,23 @@ impl ObservationSink {
         let Some(mu) = self.inner.as_ref() else {
             return;
         };
-        let Ok(mut w) = mu.lock() else {
-            tracing::warn!("observation sink mutex poisoned; skipping write");
-            return;
-        };
+        // A panic mid-write leaves at most one partial row.
+        let mut w = mu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let res = w
             .write_all(line.as_bytes())
             .and_then(|_| w.write_all(b"\n"))
             .and_then(|_| w.flush());
-        if let Err(e) = res {
-            tracing::warn!(error = %e, "observation sink write failed");
+        match res {
+            Ok(()) => {
+                if self.failing.load(Ordering::Relaxed) {
+                    self.failing.store(false, Ordering::Relaxed);
+                }
+            }
+            Err(e) => {
+                if !self.failing.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(error = %e, "observation sink write failed");
+                }
+            }
         }
     }
 }

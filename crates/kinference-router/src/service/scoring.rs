@@ -19,6 +19,8 @@ pub(crate) struct Scoring {
     pub(crate) models: Arc<ModelIndex>,
     /// The fleet's scrape samples and `/v1/models` answers.
     pub(crate) scrape: Arc<MetricsRegistry>,
+    /// Which pools are degraded, and why, so each cause logs once.
+    degraded: WarnOnce<(kinference_policy::PoolId, Degraded)>,
 }
 
 impl Scoring {
@@ -31,6 +33,7 @@ impl Scoring {
             pools,
             models,
             scrape,
+            degraded: WarnOnce::default(),
         }
     }
 
@@ -160,14 +163,20 @@ impl Scoring {
                     raw_body: raw_body.as_deref(),
                 };
                 match tokenizer.tokenize(tok_req).await {
-                    crate::tokenizer::TokenizeOutcome::Ok(tokens) => tokens,
+                    crate::tokenizer::TokenizeOutcome::Ok(tokens) => {
+                        self.degraded.clear(&(pool.id, Degraded::Tokenize));
+                        tokens
+                    }
                     crate::tokenizer::TokenizeOutcome::Unavailable { reason, attempts } => {
-                        tracing::error!(
-                            model = model,
-                            attempts,
-                            reason = %reason,
-                            "tokenize unavailable across the fleet; returning degraded ScoreResponse"
-                        );
+                        if self.degraded.first(&(pool.id, Degraded::Tokenize)) {
+                            tracing::warn!(
+                                pool = %pool.name,
+                                model = model,
+                                attempts,
+                                reason = %reason,
+                                "tokenize unavailable across the fleet; returning degraded ScoreResponse"
+                            );
+                        }
                         let degraded = self.degraded_response(&workers);
                         return (
                             ScoreOutcome::Unavailable(degraded, Degraded::Tokenize),
@@ -210,16 +219,21 @@ impl Scoring {
             side.hashes_by_block_size.insert(block_size, hashes_u64);
 
             let overlap = match pool.indexer.find_matches(hashes).await {
-                Ok(o) => o,
+                Ok(o) => {
+                    self.degraded.clear(&(pool.id, Degraded::PrefixIndex));
+                    o
+                }
                 Err(e) => {
                     // Degrade to load-only, reported as a prefix-index (not
                     // tokenize) failure.
-                    tracing::error!(
-                        pool = %pool.name,
-                        block_size,
-                        error = %e,
-                        "prefix index query failed; degrading this pick to load-only"
-                    );
+                    if self.degraded.first(&(pool.id, Degraded::PrefixIndex)) {
+                        tracing::warn!(
+                            pool = %pool.name,
+                            block_size,
+                            error = %e,
+                            "prefix index query failed; degrading this pick to load-only"
+                        );
+                    }
                     let degraded = self.degraded_response(&workers);
                     return (
                         ScoreOutcome::Unavailable(degraded, Degraded::PrefixIndex),

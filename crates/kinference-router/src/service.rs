@@ -21,6 +21,7 @@ use crate::metrics::{MetricsConfig, RouterMetrics};
 use crate::observations::{ObservationSink, Observations, Qos, RequestMeta};
 use crate::picker::WorkerScore;
 use crate::tokenizer::{self, TokenizeConfig, TokenizeInput};
+use crate::warn_once::WarnOnce;
 use kinference_fleet::FleetHandles;
 use kinference_fleet::models::ModelIndex;
 use kinference_fleet::pool::Pool;
@@ -52,7 +53,7 @@ pub(crate) enum ScoreOutcome {
 ///
 /// Both yield a load-only pick, but have different causes: the engine or
 /// network, or kinference's own index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Degraded {
     /// Every `/render` attempt across the pool failed, so there are no token
     /// ids to hash and no prefix signal is possible.
@@ -294,6 +295,8 @@ pub struct KinferenceService {
     pub(crate) policy: Option<Arc<PolicyStore>>,
     /// The metrics kinference publishes on its own `/metrics`.
     pub(crate) prom: Arc<RouterMetrics>,
+    /// Unknown `InferencePool`s that requests have named, so each logs once.
+    unknown_pools: WarnOnce<String>,
 }
 
 /// What the control plane publishes and the router reads.
@@ -338,6 +341,7 @@ impl KinferenceService {
             observations,
             policy,
             prom,
+            unknown_pools: WarnOnce::default(),
         }
     }
 

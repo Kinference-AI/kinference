@@ -37,10 +37,13 @@ impl KinferenceService {
             // Both fail open, but are logged differently: before the first list
             // completes, every pool looks unknown.
             if snapshot.listed() {
-                tracing::warn!(
-                    pool = %pref.label(),
-                    "policy: request named an unknown InferencePool; routing on load alone"
-                );
+                let pool = pref.label();
+                if self.unknown_pools.first(pool.as_str()) {
+                    tracing::warn!(
+                        pool = %pool,
+                        "policy: request named an unknown InferencePool; routing on load alone"
+                    );
+                }
                 self.prom.record_policy_decision("unknown_pool");
             } else {
                 tracing::debug!(

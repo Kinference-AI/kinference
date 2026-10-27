@@ -3,6 +3,7 @@
 //! Registered in the registry the server lends.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use prometheus::{
     Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, Registry, exponential_buckets,
@@ -186,6 +187,8 @@ pub struct RouterMetrics {
     /// How to label the `tenant` dimension. Resolved once at construction from
     /// `metrics.tenant_labels`.
     tenants: TenantPolicy,
+    /// Whether an ITL report with the wrong bucket count has been logged.
+    itl_length_warned: AtomicBool,
     /// `kinference_prompt_tokens_total{model,qos}`: prompt tokens, from ReportFinalToken.
     prompt_tokens: IntCounterVec,
     /// `kinference_completion_tokens_total{model,qos}`: completion tokens, from ReportFinalToken.
@@ -643,6 +646,7 @@ impl RouterMetrics {
         );
         let m = Self {
             tenants,
+            itl_length_warned: AtomicBool::new(false),
             picks,
             pick_duration_ms,
             tokenize_path,
@@ -999,11 +1003,13 @@ impl RouterMetrics {
             return;
         }
         if counts.len() != ITL_LE_LABELS.len() {
-            tracing::warn!(
-                got = counts.len(),
-                expected = ITL_LE_LABELS.len(),
-                "skipping ITL: bucket-count length mismatch"
-            );
+            if !self.itl_length_warned.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    got = counts.len(),
+                    expected = ITL_LE_LABELS.len(),
+                    "skipping ITL: bucket-count length mismatch"
+                );
+            }
             return;
         }
         let tenant = self.tenant_label(tenant);
