@@ -170,11 +170,11 @@ impl Scoring {
                     crate::tokenizer::TokenizeOutcome::Unavailable { reason, attempts } => {
                         if self.degraded.first(&(pool.id, Degraded::Tokenize)) {
                             tracing::warn!(
-                                pool = %pool.name,
-                                model = model,
+                                workerset = %pool.name,
+                                model,
                                 attempts,
                                 reason = %reason,
-                                "tokenize unavailable across the fleet; returning degraded ScoreResponse"
+                                "tokenize failed; picking on load alone"
                             );
                         }
                         let degraded = self.degraded_response(&workers);
@@ -213,7 +213,7 @@ impl Scoring {
                 total_blocks,
                 first_tokens = ?tokens.iter().take(8).collect::<Vec<_>>(),
                 first_hashes = ?hashes_u64.iter().take(4).collect::<Vec<_>>(),
-                "score: computed block hashes"
+                "computed block hashes"
             );
 
             side.hashes_by_block_size.insert(block_size, hashes_u64);
@@ -228,10 +228,10 @@ impl Scoring {
                     // tokenize) failure.
                     if self.degraded.first(&(pool.id, Degraded::PrefixIndex)) {
                         tracing::warn!(
-                            pool = %pool.name,
+                            workerset = %pool.name,
                             block_size,
-                            error = %e,
-                            "prefix index query failed; degrading this pick to load-only"
+                            error = &e as &dyn std::error::Error,
+                            "prefix index query failed; picking on load alone"
                         );
                     }
                     let degraded = self.degraded_response(&workers);

@@ -40,15 +40,15 @@ impl KinferenceService {
                 let pool = pref.label();
                 if self.unknown_pools.first(pool.as_str()) {
                     tracing::warn!(
-                        pool = %pool,
-                        "policy: request named an unknown InferencePool; routing on load alone"
+                        inference_pool = %pool,
+                        "unknown InferencePool; routing on load alone"
                     );
                 }
                 self.prom.record_policy_decision("unknown_pool");
             } else {
                 tracing::debug!(
-                    pool = %pref.label(),
-                    "policy: CRD watch has not listed yet; routing on load alone"
+                    inference_pool = %pref.label(),
+                    "InferencePools not listed yet; routing on load alone"
                 );
                 self.prom.record_policy_decision("not_listed");
             }
@@ -60,10 +60,10 @@ impl KinferenceService {
         if !pref.resource_version.is_empty() && pref.resource_version != resolved.resource_version {
             self.prom.record_policy_revision_mismatch();
             tracing::debug!(
-                pool = %pref.label(),
+                inference_pool = %pref.label(),
                 requested = %pref.resource_version,
                 have = %resolved.resource_version,
-                "policy: pool revision differs from the one the gateway routed on"
+                "InferencePool revision differs from the gateway's"
             );
         }
 
@@ -96,8 +96,8 @@ impl KinferenceService {
             Err(_) if !any_rule_matched => {
                 // `unmatched: Reject`.
                 tracing::debug!(
-                    pool = %pref.label(),
-                    "policy: no rule matched and unmatched=Reject; refusing"
+                    inference_pool = %pref.label(),
+                    "no policy rule matched; refusing"
                 );
                 self.prom.record_policy_decision("rejected_unmatched");
                 return Err(PickAndRecordOutcome::PolicyRejected {
@@ -277,7 +277,7 @@ impl KinferenceService {
                         model = %c.upstream_model,
                         endpoint = %endpoint,
                         predicted_ms = %predicted,
-                        "policy: candidate"
+                        "policy candidate"
                     );
                 }
                 if total > SHOWN {
@@ -285,7 +285,7 @@ impl KinferenceService {
                         rule = rule_name.as_deref().unwrap_or("<unmatched>"),
                         elided = total - SHOWN,
                         n = total,
-                        "policy: further candidates not listed"
+                        "more policy candidates not shown"
                     );
                 }
             }
@@ -305,9 +305,9 @@ impl KinferenceService {
                 }
                 engine::Outcome::Empty { trace } => {
                     tracing::debug!(
-                        pool = %pref.label(),
-                        "policy: no candidate survived — {}",
-                        trace.summary()
+                        inference_pool = %pref.label(),
+                        trace = %trace.summary(),
+                        "no policy candidate survived"
                     );
                     if rule_name.is_some() && engine::falls_through(route) {
                         // FallThrough: try the next matching rule.

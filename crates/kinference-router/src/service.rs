@@ -191,15 +191,15 @@ fn log_winner(
     };
     // `path` is logged empty rather than omitted when nothing is rewritten.
     tracing::debug!(
-        pool = %pool,
+        inference_pool = %pool,
         backend = %candidate.backend,
         class = %candidate.backend_type().as_str(),
         endpoint = %endpoint,
         path = %path,
         predicted_ms = %objective,
         model = %candidate.upstream_model,
-        "policy: {}",
-        trace.summary()
+        trace = %trace.summary(),
+        "policy chose a candidate"
     );
 }
 
@@ -417,14 +417,14 @@ impl KinferenceService {
                         if evicted > 0 {
                             tracing::debug!(
                                 evicted,
-                                "pending_observations sweep: evicted entries past TTL (inflight state released)"
+                                "evicted expired observations"
                             );
                         }
                         let dropped = self.observations.provider_health.sweep();
                         if dropped > 0 {
                             tracing::debug!(
                                 dropped,
-                                "provider health sweep: dropped providers with no live samples or failures"
+                                "dropped idle provider health entries"
                             );
                         }
                     }
@@ -444,7 +444,10 @@ impl KinferenceService {
             let id = match getrandom::getrandom(&mut buf) {
                 Ok(()) => u64::from_le_bytes(buf),
                 Err(e) => {
-                    tracing::error!(error = %e, "getrandom failed while minting a response_id");
+                    tracing::error!(
+                        error = &e as &dyn std::error::Error,
+                        "getrandom failed while minting a response_id"
+                    );
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_nanos() as u64)
@@ -662,10 +665,10 @@ fn best_group(
         };
         if multi {
             tracing::debug!(
-                pool = %group.pool.name,
+                workerset = %group.pool.name,
                 endpoints = group.scores.len(),
                 best_predicted_wait_ms = wait,
-                "pick: pool candidate"
+                "scored a worker set"
             );
         }
         // Strictly-better keeps the first pool on a tie, and `serving` is in
@@ -677,10 +680,9 @@ fn best_group(
     let (wait, group) = best?;
     if multi {
         tracing::debug!(
-            pool = %group.pool.name,
-            model = %group.model,
+            workerset = %group.pool.name,
             predicted_wait_ms = wait,
-            "pick: chose worker set among several serving the model"
+            "chose a worker set"
         );
     }
     Some(group)

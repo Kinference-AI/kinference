@@ -483,8 +483,8 @@ pub fn pick_endpoint<'a>(inputs: &PickInputs<'a>) -> Option<PickResult<'a>> {
             }
             Err(err) => {
                 tracing::warn!(
-                    error = %err,
-                    "getrandom failed; picking first eligible candidate deterministically"
+                    error = &err as &dyn std::error::Error,
+                    "getrandom failed; picking the first eligible worker"
                 );
                 eligible[0].0
             }
@@ -599,7 +599,7 @@ fn cache_replication_override(
         warm_blocks_threshold = warm_blocks,
         total_blocks = best.total_blocks,
         warm_threshold_fraction = fraction,
-        "cache replication redirect"
+        "redirecting to replicate the prefix cache"
     );
     cand_idx
 }

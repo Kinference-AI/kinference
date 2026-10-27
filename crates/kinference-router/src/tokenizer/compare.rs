@@ -102,7 +102,7 @@ impl Compare {
                     local_window = ?local_win,
                     http_text = %http_text,
                     local_text = %local_text,
-                    "local_tokenize divergence — in-process result differs from /render"
+                    "local tokens differ from /render"
                 );
             }
             Err(e) => {
@@ -111,7 +111,7 @@ impl Compare {
                     tracing::warn!(
                         model,
                         error = &e as &dyn std::error::Error,
-                        "local_tokenize failed; HTTP result returned unchanged"
+                        "local tokenize failed"
                     );
                 }
             }

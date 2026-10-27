@@ -343,10 +343,7 @@ impl RouterMetrics {
     pub fn new(registry: &Registry, cfg: &MetricsConfig) -> Self {
         if matches!(cfg.tenant_labels, TenantLabels::All) {
             tracing::warn!(
-                "metrics.tenant_labels = \"all\": every tenant id seen becomes its own \
-                 label value, which is UNBOUNDED — about 91 Prometheus series per \
-                 (model, qos, tenant). A caller that sends a unique tenant per request \
-                 will grow the registry without limit. Use an explicit allowlist to bound it."
+                "tenant label values are unbounded; set metrics.tenant_labels to an allowlist"
             );
         }
         let tenants = TenantPolicy::from(&cfg.tenant_labels);
@@ -993,7 +990,7 @@ impl RouterMetrics {
             tracing::debug!(
                 layout,
                 expected = ITL_BUCKET_LAYOUT,
-                "skipping ITL: bucket-layout mismatch"
+                "skipping an ITL report with an unknown bucket layout"
             );
             return;
         }
@@ -1007,7 +1004,7 @@ impl RouterMetrics {
                 tracing::warn!(
                     got = counts.len(),
                     expected = ITL_LE_LABELS.len(),
-                    "skipping ITL: bucket-count length mismatch"
+                    "skipping an ITL report with the wrong bucket count"
                 );
             }
             return;

@@ -91,7 +91,7 @@ impl HttpRender {
                 Ok(tokens) => {
                     tracing::trace!(
                         mode = "render",
-                        tokenize_url = %url,
+                        url = %url,
                         attempt = 1,
                         render_ms = format_args!("{render_ms:.1}"),
                         token_count = tokens.len(),
@@ -145,7 +145,7 @@ impl HttpRender {
                     Ok(tokens) => {
                         tracing::trace!(
                             mode = "render",
-                            http_url = %url,
+                            url = %url,
                             attempt = i + 1,
                             render_ms = format_args!("{render_ms:.1}"),
                             token_count = tokens.len(),
@@ -157,12 +157,12 @@ impl HttpRender {
                         let err_string = e.chain();
                         tracing::debug!(
                             worker_id = %worker_id_str,
-                            http_url = %url,
+                            url = %url,
                             attempt = i + 1,
-                            of_attempts = attempts,
+                            attempts,
                             render_ms = format_args!("{render_ms:.1}"),
-                            error = %err_string,
-                            "render failed; falling back to next worker"
+                            error = &e as &dyn std::error::Error,
+                            "render failed; trying the next worker"
                         );
                         last_err = Some(err_string);
                     }

@@ -291,7 +291,7 @@ impl BodyStore {
                         body = id,
                         bytes = entry.bytes,
                         req = entry.client_request_id.as_deref().unwrap_or("-"),
-                        "body_store: reclaimed a buffered body past TTL"
+                        "reclaimed an expired body"
                     );
                 }
                 self.release(entry.bytes);
@@ -359,7 +359,10 @@ impl BodyStore {
             let candidate = match getrandom::getrandom(&mut buf) {
                 Ok(()) => u64::from_le_bytes(buf),
                 Err(e) => {
-                    tracing::error!(error = %e, "getrandom failed while minting a body id");
+                    tracing::error!(
+                        error = &e as &dyn std::error::Error,
+                        "getrandom failed while minting a body id"
+                    );
                     // Wall-clock nanos: guessable, but this path is effectively
                     // unreachable and failing the push would be worse.
                     std::time::SystemTime::now()
@@ -701,7 +704,7 @@ impl Bodies {
             tracing::debug!(
                 req = %req_label,
                 declared,
-                "push_body: refused on declared length"
+                "body refused on its declared length"
             );
             return Err(status);
         }
@@ -723,7 +726,7 @@ impl Bodies {
                 tracing::debug!(
                     req = %req_label,
                     code = ?status.code(),
-                    "push_body: aborted before half-close; discarding"
+                    "body push failed"
                 );
                 return Err(status);
             }
@@ -737,7 +740,7 @@ impl Bodies {
             stream_id,
             total_bytes,
             elapsed_ms = started.elapsed().as_millis() as u64,
-            "push_body: buffered"
+            "body buffered"
         );
         Ok((stream_id, total_bytes))
     }

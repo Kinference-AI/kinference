@@ -285,7 +285,7 @@ impl Picker for KinferenceService {
                 {
                     tracing::debug!(
                         response_id = req.response_id,
-                        "pull_body: caller stopped consuming; dropping the rest"
+                        "caller stopped pulling the body"
                     );
                     return;
                 }
@@ -317,8 +317,7 @@ impl Picker for KinferenceService {
         let acknowledged = if req.upstream_status == 0 {
             tracing::debug!(
                 response_id = req.response_id,
-                "report_first_token: upstream_status=0 (no response reached the caller); \
-                 treating as not-dispatched"
+                "no upstream response; releasing the pick"
             );
             let (released, _) = self.abort_request(req.response_id);
             released
@@ -388,7 +387,7 @@ impl Picker for KinferenceService {
             detail = %req.detail,
             released,
             bytes_released,
-            "abort"
+            "request aborted"
         );
         Ok(Response::new(AbortResponse { released }))
     }
