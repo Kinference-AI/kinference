@@ -394,8 +394,7 @@ impl Drop for ByteGuard {
 pub struct Reservation {
     store: Arc<BodyStore>,
     bytes: u64,
-    /// Rides along so `commit` can stamp it onto the entry, and so an
-    /// abandoned push is traceable in the Drop log.
+    /// Rides along so `commit` can stamp it onto the entry.
     client_request_id: Option<String>,
 }
 
@@ -421,15 +420,7 @@ impl Reservation {
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        let bytes = self.bytes;
-        if bytes > 0 {
-            tracing::debug!(
-                bytes,
-                req = self.client_request_id.as_deref().unwrap_or("-"),
-                "body_store: released an abandoned in-progress push"
-            );
-        }
-        self.store.release(bytes);
+        self.store.release(self.bytes);
     }
 }
 
@@ -677,15 +668,14 @@ impl Bodies {
     }
 
     /// Reclaim buffered bodies past their TTL, count them, and refresh the
-    /// buffer gauges. Returns `(entries, bytes)` freed.
-    pub(crate) fn sweep(&self) -> (usize, u64) {
-        let (reaped, bytes) = self.store.take_expired();
+    /// buffer gauges.
+    pub(crate) fn sweep(&self) {
+        let (reaped, _) = self.store.take_expired();
         if reaped > 0 {
             self.prom.record_bodies_reaped(reaped as u64);
         }
         let (entries, in_use) = self.store.stats();
         self.prom.set_body_buffer(entries as u64, in_use);
-        (reaped, bytes)
     }
 
     /// `PushBody` after its metadata is read: refuse on the declared length
@@ -708,7 +698,7 @@ impl Bodies {
             && let Err((status, reason)) = self.store.check_declared_length(declared)
         {
             self.prom.record_body_rejected(reason.as_label());
-            tracing::warn!(
+            tracing::debug!(
                 req = %req_label,
                 declared,
                 "push_body: refused on declared length"
@@ -730,7 +720,7 @@ impl Bodies {
                     self.prom.record_body_rejected(reason.as_label());
                 }
                 let status = failure.into_status();
-                tracing::warn!(
+                tracing::debug!(
                     req = %req_label,
                     code = ?status.code(),
                     "push_body: aborted before half-close; discarding"
@@ -742,7 +732,7 @@ impl Bodies {
         let total_bytes = buf.len() as u64;
         let stream_id = self.store.commit(reservation, buf);
         self.prom.record_body_pushed(total_bytes);
-        tracing::debug!(
+        tracing::trace!(
             req = %req_label,
             stream_id,
             total_bytes,

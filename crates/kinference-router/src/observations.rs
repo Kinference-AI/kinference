@@ -836,12 +836,6 @@ impl Observations {
         // For non-streaming responses `observed_ttft_ms` is the full response
         // time, not TTFT, so skip the CSV row and residual log.
         if !record.streaming {
-            tracing::debug!(
-                req = %req_label_owned,
-                endpoint = %record.chosen_worker.endpoint,
-                status = upstream_status,
-                "observation skipped: non-streaming response (reported time is total latency, not TTFT)"
-            );
             return true;
         }
 
@@ -883,15 +877,6 @@ impl Observations {
             return false;
         };
         release_inflight_state(&record);
-        let req_label_owned = record
-            .external_request_id
-            .clone()
-            .unwrap_or_else(|| record.request_id.to_string());
-        tracing::debug!(
-            req = %req_label_owned,
-            endpoint = %record.chosen_worker.endpoint,
-            "abort: cleared inflight/inflight-prefix state without CSV emit"
-        );
         true
     }
 

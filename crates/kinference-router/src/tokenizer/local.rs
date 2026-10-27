@@ -213,7 +213,7 @@ impl LocalTokenizer {
         match result {
             Ok(tokens) => {
                 self.prom.record_tokenize_path("local");
-                tracing::debug!(
+                tracing::trace!(
                     mode = "local",
                     model = %model,
                     render_ms = format_args!("{render_ms:.1}"),

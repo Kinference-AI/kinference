@@ -524,7 +524,7 @@ pub fn pick_endpoint<'a>(inputs: &PickInputs<'a>) -> Option<PickResult<'a>> {
 ///    originally-picked worker's predicted total. A percentage, so it
 ///    scales with prompt size.
 ///
-/// Otherwise returns `chosen_idx` unchanged. A swap is logged at INFO.
+/// Otherwise returns `chosen_idx` unchanged. A swap is logged at DEBUG.
 fn cache_replication_override(
     scores: &[WorkerScore],
     picker: &PickerConfig,
@@ -586,7 +586,7 @@ fn cache_replication_override(
         return chosen_idx;
     }
     let cand = &scores[cand_idx];
-    tracing::info!(
+    tracing::debug!(
         from_endpoint = %best.endpoint,
         from_predicted_ms = best_ms,
         to_endpoint = %cand.endpoint,
@@ -604,10 +604,10 @@ fn cache_replication_override(
     cand_idx
 }
 
-/// Render a debug-level table of every scored worker with the predictor's
-/// per-term breakdown. Rows are sorted by `name` so consecutive tables line
-/// up; the `chosen_endpoint` row is marked with `*`. A leading `weights:`
-/// line shows the configuration shared by all rows.
+/// Render a table of every scored worker with the predictor's per-term
+/// breakdown, for the pick path's TRACE log. Rows are sorted by `name` so
+/// consecutive tables line up; the `chosen_endpoint` row is marked with `*`.
+/// A leading `weights:` line shows the configuration shared by all rows.
 ///
 /// Columns:
 /// - `expect_ms` = the predicted TTFT, the sum of the `_ms` columns

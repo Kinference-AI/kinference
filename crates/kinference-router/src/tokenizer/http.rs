@@ -89,7 +89,7 @@ impl HttpRender {
             let render_ms = started.elapsed().as_secs_f64() * 1000.0;
             match result {
                 Ok(tokens) => {
-                    tracing::debug!(
+                    tracing::trace!(
                         mode = "render",
                         tokenize_url = %url,
                         attempt = 1,
@@ -140,7 +140,7 @@ impl HttpRender {
         let do_attempts = async {
             let mut last_err: Option<String> = None;
             for (i, (_num, worker_id_str, url)) in candidates.iter().enumerate() {
-                // Timed per call, logged at DEBUG.
+                // Timed per call, logged at TRACE.
                 let render_start = std::time::Instant::now();
                 let result = match raw_body {
                     Some(body) => render_via_vllm_raw(&self.client, url, body).await,
@@ -149,7 +149,7 @@ impl HttpRender {
                 let render_ms = render_start.elapsed().as_secs_f64() * 1000.0;
                 match result {
                     Ok(tokens) => {
-                        tracing::debug!(
+                        tracing::trace!(
                             mode = "render",
                             http_url = %url,
                             attempt = i + 1,
@@ -161,7 +161,7 @@ impl HttpRender {
                     }
                     Err(e) => {
                         let err_string = e.chain();
-                        tracing::warn!(
+                        tracing::debug!(
                             worker_id = %worker_id_str,
                             http_url = %url,
                             attempt = i + 1,

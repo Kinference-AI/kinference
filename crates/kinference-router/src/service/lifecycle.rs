@@ -226,7 +226,7 @@ impl KinferenceService {
                 .choose_model_for_auto(messages.map(|m| m.as_slice()).unwrap_or(&[]))
             {
                 Some(chosen) => {
-                    tracing::info!(
+                    tracing::debug!(
                         chosen_model = %chosen,
                         "auto: resolved pseudo-model to concrete model"
                     );
@@ -234,7 +234,7 @@ impl KinferenceService {
                     force_model = Some(chosen);
                 }
                 None => {
-                    tracing::info!("auto: no candidate models available yet (cold start?)");
+                    tracing::debug!("auto: no candidate models available yet (cold start?)");
                     return Err(PickAndRecordOutcome::NoWorkers { model });
                 }
             }
@@ -257,7 +257,7 @@ impl KinferenceService {
         if serving.is_empty()
             && let Some(upstream) = self.resolve_alias(req.pool_ref, &model)
         {
-            tracing::info!(
+            tracing::debug!(
                 alias = %model,
                 upstream_model = %upstream,
                 "pick: resolved declared alias to an upstream model"
@@ -272,7 +272,7 @@ impl KinferenceService {
         // the named pool, so check before refusing.
         if serving.is_empty() {
             if !self.provider_serves(req.pool_ref, &model) {
-                tracing::info!(
+                tracing::debug!(
                     model = %model,
                     "pick: no pool serves model (unknown model or cold-start before /v1/models)"
                 );
@@ -381,11 +381,6 @@ impl KinferenceService {
                 // Not fatal: another pool or a provider may serve the model.
                 ScoreOutcome::NoWorkers => {}
             }
-        } else {
-            // Normal for a provider-only model.
-            tracing::debug!(
-                "pick: no local group to score; the decision rests entirely with the policy"
-            );
         }
 
         // The remaining pools serving this model, reusing the first group's
@@ -473,7 +468,7 @@ impl KinferenceService {
         // are unreachable.
         let Some((pref, store)) = policy else {
             let Some(group) = winner else {
-                tracing::info!("pick: no workers serve model");
+                tracing::debug!("pick: no workers serve model");
                 return Err(PickAndRecordOutcome::NoWorkers { model });
             };
             return Ok(Selected::Local {
@@ -533,7 +528,7 @@ impl KinferenceService {
                         model,
                     });
                 }
-                tracing::info!(
+                tracing::debug!(
                     provider = %pick.provider.label(),
                     backend = %pick.backend_ref.label(),
                     to_model = %pick.upstream_model,
@@ -549,7 +544,7 @@ impl KinferenceService {
             Ok(PolicySelection::Picker { group: Some(group) }) => (group, None),
             Ok(PolicySelection::Picker { group: None }) => {
                 // Nothing local was scored and no provider chosen.
-                tracing::info!("pick: no local group and no provider chosen");
+                tracing::debug!("pick: no local group and no provider chosen");
                 return Err(PickAndRecordOutcome::NoWorkers { model });
             }
             Err(outcome) => return Err(outcome),
@@ -786,8 +781,8 @@ impl KinferenceService {
             let chosen_idx = pick_result.index;
             let replication_fired = pick_result.replication_fired;
 
-            if tracing::enabled!(tracing::Level::DEBUG) {
-                tracing::debug!(
+            if tracing::enabled!(tracing::Level::TRACE) {
+                tracing::trace!(
                     "pick: score table\n{}",
                     crate::picker::format_score_table(
                         &inputs,
@@ -796,7 +791,7 @@ impl KinferenceService {
                     )
                 );
             }
-            tracing::info!(
+            tracing::debug!(
                 chosen_endpoint = %chosen.endpoint,
                 chosen_name = %chosen.name,
                 scored = scores.len(),

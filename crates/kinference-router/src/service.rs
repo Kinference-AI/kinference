@@ -354,13 +354,6 @@ impl KinferenceService {
     ) -> Result<Arc<Self>, Error> {
         let prom = Arc::new(RouterMetrics::new(registry, &config.metrics));
         let limits = config.bodies;
-        tracing::info!(
-            max_total_bytes = limits.max_total_bytes,
-            max_request_bytes = limits.max_request_bytes,
-            ttl_secs = limits.ttl.as_secs(),
-            idle_timeout_secs = limits.idle_timeout.as_secs(),
-            "Body buffer configured"
-        );
         let store =
             body_store::shared(limits.max_total_bytes, limits.max_request_bytes, limits.ttl);
         let tokenizer = tokenizer::build(
@@ -399,14 +392,7 @@ impl KinferenceService {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = interval.tick() => {
-                        let (reaped, bytes) = self.bodies.sweep();
-                        if reaped > 0 {
-                            tracing::debug!(
-                                reaped,
-                                bytes,
-                                "body_store sweep: reclaimed buffered bodies past TTL"
-                            );
-                        }
+                        self.bodies.sweep();
                     }
                 }
             }
@@ -686,7 +672,7 @@ fn best_group(
     }
     let (wait, group) = best?;
     if multi {
-        tracing::info!(
+        tracing::debug!(
             pool = %group.pool.name,
             model = %group.model,
             predicted_wait_ms = wait,

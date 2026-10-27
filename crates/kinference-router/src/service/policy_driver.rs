@@ -92,7 +92,7 @@ impl KinferenceService {
             Ok(route) => plan.push((None, route)),
             Err(_) if !any_rule_matched => {
                 // `unmatched: Reject`.
-                tracing::info!(
+                tracing::debug!(
                     pool = %pref.label(),
                     "policy: no rule matched and unmatched=Reject; refusing"
                 );
@@ -231,7 +231,7 @@ impl KinferenceService {
             // Log the cross-group ranking, which the per-group score table
             // can't show. One line per candidate, best first, capped; `rank` and
             // `n` show when the list is truncated.
-            if tracing::enabled!(tracing::Level::DEBUG) {
+            if tracing::enabled!(tracing::Level::TRACE) {
                 // Providers have no prediction, so they sort last.
                 let sort_key = |c: &engine::Candidate| match &c.target {
                     engine::CandidateTarget::Local {
@@ -265,7 +265,7 @@ impl KinferenceService {
                                 .unwrap_or_else(|| "unobserved".to_string()),
                         ),
                     };
-                    tracing::debug!(
+                    tracing::trace!(
                         rule = rule_name.as_deref().unwrap_or("<unmatched>"),
                         rank = i + 1,
                         n = total,
@@ -278,7 +278,7 @@ impl KinferenceService {
                     );
                 }
                 if total > SHOWN {
-                    tracing::debug!(
+                    tracing::trace!(
                         rule = rule_name.as_deref().unwrap_or("<unmatched>"),
                         elided = total - SHOWN,
                         n = total,

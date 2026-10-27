@@ -268,12 +268,6 @@ impl Picker for KinferenceService {
     ) -> Result<Response<Self::PullBodyStream>, Status> {
         let req = request.into_inner();
         let lease = self.bodies.store.take_outbound(req.response_id)?;
-        let total = lease.len();
-        tracing::debug!(
-            response_id = req.response_id,
-            total_bytes = total,
-            "pull_body: streaming"
-        );
 
         let (tx, rx) = mpsc::channel(PULL_CHANNEL_DEPTH);
         tokio::spawn(async move {

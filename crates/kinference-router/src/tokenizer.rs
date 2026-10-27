@@ -163,7 +163,6 @@ pub(crate) fn build(
 ) -> Result<Arc<dyn Tokenizer>, Error> {
     let pool_max_idle_per_host = cfg.pool_max_idle_per_host.unwrap_or(16);
     let http = Arc::new(HttpRender::new(pool_max_idle_per_host, scrape)?);
-    tracing::info!(pool_max_idle_per_host, "tokenize HTTP client built");
     // Fleet-wide and cheap to build, so always built; each pool's mode
     // decides whether to use it.
     let local = Arc::new(LocalTokenizer::new(
@@ -171,11 +170,6 @@ pub(crate) fn build(
         http.clone(),
         prom.clone(),
     )?);
-    tracing::info!(
-        mount_dir = ?cfg.local.mount_dir,
-        warmup = cfg.local.warmup,
-        "local tokenizer built"
-    );
     if cfg.local.warmup {
         local
             .clone()

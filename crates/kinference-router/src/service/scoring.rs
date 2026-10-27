@@ -199,7 +199,7 @@ impl Scoring {
             // them.
             let hashes_u64: Vec<u64> = hashes.iter().map(|h| h.0).collect();
 
-            tracing::debug!(
+            tracing::trace!(
                 block_size,
                 total_blocks,
                 first_tokens = ?tokens.iter().take(8).collect::<Vec<_>>(),
