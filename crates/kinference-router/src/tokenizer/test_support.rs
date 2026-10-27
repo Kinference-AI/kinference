@@ -140,7 +140,6 @@ pub(crate) fn request<'a>(
         model,
         input,
         raw_body: None,
-        req_id: None,
     }
 }
 

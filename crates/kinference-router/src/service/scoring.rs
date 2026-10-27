@@ -95,7 +95,6 @@ impl Scoring {
         model: &str,
         input: ScoreInput,
         chat_kwargs: HashMap<String, String>,
-        req_id: Option<&str>,
     ) -> (ScoreOutcome, ScoreSideData) {
         let mut side = ScoreSideData {
             tokens: Vec::new(),
@@ -159,7 +158,6 @@ impl Scoring {
                     model,
                     input: tok_input,
                     raw_body: raw_body.as_deref(),
-                    req_id,
                 };
                 match tokenizer.tokenize(tok_req).await {
                     crate::tokenizer::TokenizeOutcome::Ok(tokens) => tokens,
@@ -202,7 +200,6 @@ impl Scoring {
             let hashes_u64: Vec<u64> = hashes.iter().map(|h| h.0).collect();
 
             tracing::debug!(
-                req = %req_id.unwrap_or("-"),
                 block_size,
                 total_blocks,
                 first_tokens = ?tokens.iter().take(8).collect::<Vec<_>>(),

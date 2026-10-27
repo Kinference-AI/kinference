@@ -75,7 +75,6 @@ impl HttpRender {
             model,
             ref input,
             raw_body,
-            req_id,
             ..
         } = req;
         // A configured `render_url` (typically a Service) replaces the
@@ -91,7 +90,6 @@ impl HttpRender {
             match result {
                 Ok(tokens) => {
                     tracing::debug!(
-                        req = %req_id.unwrap_or("-"),
                         mode = "render",
                         tokenize_url = %url,
                         attempt = 1,
@@ -152,7 +150,6 @@ impl HttpRender {
                 match result {
                     Ok(tokens) => {
                         tracing::debug!(
-                            req = %req_id.unwrap_or("-"),
                             mode = "render",
                             http_url = %url,
                             attempt = i + 1,

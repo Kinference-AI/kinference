@@ -98,8 +98,6 @@ pub(crate) struct TokenizeRequest<'a> {
     /// The client's body, forwarded verbatim to `/render` when present;
     /// local tokenization uses `input`.
     pub raw_body: Option<&'a [u8]>,
-    /// For log context only.
-    pub req_id: Option<&'a str>,
 }
 
 /// Turns one request into the token ids the engine will hash.

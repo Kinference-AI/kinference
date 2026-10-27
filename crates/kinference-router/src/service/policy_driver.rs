@@ -29,7 +29,6 @@ impl KinferenceService {
         requested_model: &str,
         spare: Option<ScoreInput>,
         attrs: kinference_policy::predicate::RequestAttrs,
-        req_label: &str,
     ) -> Result<PolicySelection, PickAndRecordOutcome> {
         use kinference_policy::engine;
 
@@ -39,14 +38,12 @@ impl KinferenceService {
             // completes, every pool looks unknown.
             if snapshot.listed() {
                 tracing::warn!(
-                    req = %req_label,
                     pool = %pref.label(),
                     "policy: request named an unknown InferencePool; routing on load alone"
                 );
                 self.prom.record_policy_decision("unknown_pool");
             } else {
                 tracing::debug!(
-                    req = %req_label,
                     pool = %pref.label(),
                     "policy: CRD watch has not listed yet; routing on load alone"
                 );
@@ -60,7 +57,6 @@ impl KinferenceService {
         if !pref.resource_version.is_empty() && pref.resource_version != resolved.resource_version {
             self.prom.record_policy_revision_mismatch();
             tracing::debug!(
-                req = %req_label,
                 pool = %pref.label(),
                 requested = %pref.resource_version,
                 have = %resolved.resource_version,
@@ -97,7 +93,6 @@ impl KinferenceService {
             Err(_) if !any_rule_matched => {
                 // `unmatched: Reject`.
                 tracing::info!(
-                    req = %req_label,
                     pool = %pref.label(),
                     "policy: no rule matched and unmatched=Reject; refusing"
                 );
@@ -200,7 +195,6 @@ impl KinferenceService {
                                         &upstream,
                                         input,
                                         HashMap::new(),
-                                        Some(req_label),
                                     )
                                     .await;
                                 let s = match outcome {
@@ -272,7 +266,6 @@ impl KinferenceService {
                         ),
                     };
                     tracing::debug!(
-                        req = %req_label,
                         rule = rule_name.as_deref().unwrap_or("<unmatched>"),
                         rank = i + 1,
                         n = total,
@@ -286,7 +279,6 @@ impl KinferenceService {
                 }
                 if total > SHOWN {
                     tracing::debug!(
-                        req = %req_label,
                         rule = rule_name.as_deref().unwrap_or("<unmatched>"),
                         elided = total - SHOWN,
                         n = total,
@@ -297,7 +289,7 @@ impl KinferenceService {
 
             match engine::evaluate(route, rule_name.as_deref(), &attrs, candidates) {
                 engine::Outcome::Chosen { candidate, trace } => {
-                    log_winner(req_label, &pref.label(), &candidate, &trace);
+                    log_winner(&pref.label(), &candidate, &trace);
                     self.prom.record_policy_decision(if rule_name.is_some() {
                         "chosen"
                     } else {
@@ -310,7 +302,6 @@ impl KinferenceService {
                 }
                 engine::Outcome::Empty { trace } => {
                     tracing::debug!(
-                        req = %req_label,
                         pool = %pref.label(),
                         "policy: no candidate survived — {}",
                         trace.summary()

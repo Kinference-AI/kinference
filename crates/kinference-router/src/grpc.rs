@@ -17,6 +17,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
+use tracing::Instrument;
 
 use crate::metrics::PickOutcome;
 use crate::observations::{FinalTokenReport, Qos};
@@ -123,6 +124,13 @@ impl Picker for KinferenceService {
             });
         // Verbatim, including "", which a policy can match.
         let identity = kinference_policy::RequestIdentity { tenant: req.tenant };
+        // `model` is recorded once the pick resolves it.
+        let span = tracing::info_span!(
+            "pick",
+            req = %client_request_id.unwrap_or("-"),
+            response_id,
+            model = tracing::field::Empty,
+        );
         let outcome = self
             .pick_and_record(
                 &pushed,
@@ -132,6 +140,7 @@ impl Picker for KinferenceService {
                 pool_ref.as_ref(),
                 &identity,
             )
+            .instrument(span)
             .await;
         let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
 

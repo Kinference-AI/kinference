@@ -37,7 +37,7 @@ fn group(pool: Arc<Pool>, scores: Vec<WorkerScore>) -> ScoredGroup {
 async fn the_less_loaded_pool_wins() {
     let busy = group(test_pool("busy"), vec![score("10.0.0.1:8000", 64)]);
     let idle = group(test_pool("idle"), vec![score("10.0.0.2:8000", 0)]);
-    let winner = best_group(vec![busy, idle], "req", None).expect("a pool must win");
+    let winner = best_group(vec![busy, idle], None).expect("a pool must win");
     assert_eq!(winner.pool.name, "idle");
 }
 
@@ -56,7 +56,7 @@ async fn a_pool_is_ranked_by_its_best_endpoint() {
     let steady = group(test_pool("steady"), vec![score("10.0.0.4:8000", 8)]);
     // `steady` goes first, so returning the head or ranking on the mean
     // would both pick it.
-    let winner = best_group(vec![steady, mixed], "req", None).expect("a pool must win");
+    let winner = best_group(vec![steady, mixed], None).expect("a pool must win");
     assert_eq!(winner.pool.name, "mixed");
 }
 
@@ -65,9 +65,9 @@ async fn a_pool_is_ranked_by_its_best_endpoint() {
 async fn a_pool_with_no_scores_is_skipped() {
     let empty = group(test_pool("empty"), Vec::new());
     let live = group(test_pool("live"), vec![score("10.0.0.1:8000", 4)]);
-    let winner = best_group(vec![empty, live], "req", None).expect("a pool must win");
+    let winner = best_group(vec![empty, live], None).expect("a pool must win");
     assert_eq!(winner.pool.name, "live");
-    assert!(best_group(vec![group(test_pool("empty"), Vec::new())], "req", None).is_none());
+    assert!(best_group(vec![group(test_pool("empty"), Vec::new())], None).is_none());
 }
 
 /// Ties keep the first group, and `resolve_pools` yields pool-id order, so
@@ -76,7 +76,7 @@ async fn a_pool_with_no_scores_is_skipped() {
 async fn a_tie_keeps_the_first_group() {
     let first = group(test_pool("first"), vec![score("10.0.0.1:8000", 3)]);
     let second = group(test_pool("second"), vec![score("10.0.0.2:8000", 3)]);
-    let winner = best_group(vec![first, second], "req", None).expect("a pool must win");
+    let winner = best_group(vec![first, second], None).expect("a pool must win");
     assert_eq!(winner.pool.name, "first");
 }
 
@@ -426,7 +426,7 @@ async fn select(
         requested_model: model.into(),
         ..Default::default()
     };
-    svc.policy_select(&pref, store, Some(start), model, spare, attrs, "test")
+    svc.policy_select(&pref, store, Some(start), model, spare, attrs)
         .await
 }
 
@@ -525,7 +525,7 @@ async fn select_aliased(
     };
     let out = t
         .svc
-        .policy_select(&pref, t.store(), Some(start), "qwen", spare, attrs, "test")
+        .policy_select(&pref, t.store(), Some(start), "qwen", spare, attrs)
         .await;
     (t, out)
 }
@@ -593,7 +593,6 @@ async fn dropping_an_alias_drops_a_provider_model_under_every_name() {
             "qwen",
             None,
             attrs,
-            "test",
         )
         .await;
     assert!(

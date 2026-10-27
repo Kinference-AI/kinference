@@ -160,7 +160,6 @@ fn selection(
 
 /// Log the winner precisely enough to find it in the ranked candidate list.
 fn log_winner(
-    req_label: &str,
     pool: &str,
     candidate: &kinference_policy::engine::Candidate,
     trace: &kinference_policy::engine::Trace,
@@ -191,7 +190,6 @@ fn log_winner(
     };
     // `path` is logged empty rather than omitted when nothing is rewritten.
     tracing::debug!(
-        req = %req_label,
         pool = %pool,
         backend = %candidate.backend,
         class = %candidate.backend_type().as_str(),
@@ -639,7 +637,6 @@ pub fn first_served_upstream(
 /// the model had a usable worker.
 fn best_group(
     groups: Vec<ScoredGroup>,
-    req_label: &str,
     // `Option` so tests can omit it. Predictions are recorded here, where
     // they are computed per endpoint.
     prom: Option<&crate::metrics::RouterMetrics>,
@@ -675,7 +672,6 @@ fn best_group(
         };
         if multi {
             tracing::debug!(
-                req = %req_label,
                 pool = %group.pool.name,
                 endpoints = group.scores.len(),
                 best_predicted_wait_ms = wait,
@@ -691,7 +687,6 @@ fn best_group(
     let (wait, group) = best?;
     if multi {
         tracing::info!(
-            req = %req_label,
             pool = %group.pool.name,
             model = %group.model,
             predicted_wait_ms = wait,

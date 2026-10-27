@@ -205,10 +205,7 @@ impl LocalTokenizer {
     /// chat template, render or encode error) falls back.
     pub(crate) async fn encode_or_render(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
         let &TokenizeRequest {
-            model,
-            ref input,
-            req_id,
-            ..
+            model, ref input, ..
         } = req;
         let started = std::time::Instant::now();
         let result = self.encode(model, input).await;
@@ -217,7 +214,6 @@ impl LocalTokenizer {
             Ok(tokens) => {
                 self.prom.record_tokenize_path("local");
                 tracing::debug!(
-                    req = %req_id.unwrap_or("-"),
                     mode = "local",
                     model = %model,
                     render_ms = format_args!("{render_ms:.1}"),
