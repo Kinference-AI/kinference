@@ -148,9 +148,9 @@ pub struct PredictorConfig {
     /// layer. Plausible active-fleet values: 0.7–0.9.
     ///
     /// A predictor coefficient like the rest: it sets the uncached-block count,
-    /// which is the dominant term in the prefill estimate, and
-    /// `analysis/analyze-latency.py` already refits it in the same sweep as the
-    /// attention coefficients.
+    /// which is the dominant term in the prefill estimate. The observation CSV
+    /// doesn't record in-flight progress, so `analysis/analyze-latency.py`
+    /// can't refit it.
     ///
     /// Physically it is an eviction rate (KV capacity ÷ working set), so it
     /// tracks GPU SKU and TP degree, which is why it belongs to a profile
