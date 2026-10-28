@@ -17,7 +17,6 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
-use tracing::Instrument;
 
 use crate::metrics::PickOutcome;
 use crate::observations::{FinalTokenReport, Qos};
@@ -124,13 +123,6 @@ impl Picker for KinferenceService {
             });
         // Verbatim, including "", which a policy can match.
         let identity = kinference_policy::RequestIdentity { tenant: req.tenant };
-        // `model` is recorded once the pick resolves it.
-        let span = tracing::info_span!(
-            "pick",
-            req = %client_request_id.unwrap_or("-"),
-            response_id,
-            model = tracing::field::Empty,
-        );
         let outcome = self
             .pick_and_record(
                 &pushed,
@@ -140,7 +132,6 @@ impl Picker for KinferenceService {
                 pool_ref.as_ref(),
                 &identity,
             )
-            .instrument(span)
             .await;
         let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
 
@@ -268,6 +259,12 @@ impl Picker for KinferenceService {
     ) -> Result<Response<Self::PullBodyStream>, Status> {
         let req = request.into_inner();
         let lease = self.bodies.store.take_outbound(req.response_id)?;
+        let total = lease.len();
+        tracing::debug!(
+            response_id = req.response_id,
+            total_bytes = total,
+            "pull_body: streaming"
+        );
 
         let (tx, rx) = mpsc::channel(PULL_CHANNEL_DEPTH);
         tokio::spawn(async move {
@@ -285,7 +282,7 @@ impl Picker for KinferenceService {
                 {
                     tracing::debug!(
                         response_id = req.response_id,
-                        "caller stopped pulling the body"
+                        "pull_body: caller stopped consuming; dropping the rest"
                     );
                     return;
                 }
@@ -317,7 +314,8 @@ impl Picker for KinferenceService {
         let acknowledged = if req.upstream_status == 0 {
             tracing::debug!(
                 response_id = req.response_id,
-                "no upstream response; releasing the pick"
+                "report_first_token: upstream_status=0 (no response reached the caller); \
+                 treating as not-dispatched"
             );
             let (released, _) = self.abort_request(req.response_id);
             released
@@ -387,7 +385,7 @@ impl Picker for KinferenceService {
             detail = %req.detail,
             released,
             bytes_released,
-            "request aborted"
+            "abort"
         );
         Ok(Response::new(AbortResponse { released }))
     }

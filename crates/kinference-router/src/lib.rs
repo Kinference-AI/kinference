@@ -19,7 +19,6 @@
 //!   the policy driver, bodies and observations.
 //! - [`tokenizer`][]: the `Tokenizer` trait and its backends: in-process,
 //!   vLLM's `/render`, and the comparison of the two.
-//! - `warn_once`: a latch that logs a repeating failure once per cause.
 
 pub mod body_store;
 pub mod error;
@@ -31,6 +30,5 @@ pub mod picker;
 pub mod proto;
 pub mod service;
 pub mod tokenizer;
-mod warn_once;
 
 pub use error::Error;

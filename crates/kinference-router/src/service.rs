@@ -21,7 +21,6 @@ use crate::metrics::{MetricsConfig, RouterMetrics};
 use crate::observations::{ObservationSink, Observations, Qos, RequestMeta};
 use crate::picker::WorkerScore;
 use crate::tokenizer::{self, TokenizeConfig, TokenizeInput};
-use crate::warn_once::WarnOnce;
 use kinference_fleet::FleetHandles;
 use kinference_fleet::models::ModelIndex;
 use kinference_fleet::pool::Pool;
@@ -53,7 +52,7 @@ pub(crate) enum ScoreOutcome {
 ///
 /// Both yield a load-only pick, but have different causes: the engine or
 /// network, or kinference's own index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Degraded {
     /// Every `/render` attempt across the pool failed, so there are no token
     /// ids to hash and no prefix signal is possible.
@@ -161,6 +160,7 @@ fn selection(
 
 /// Log the winner precisely enough to find it in the ranked candidate list.
 fn log_winner(
+    req_label: &str,
     pool: &str,
     candidate: &kinference_policy::engine::Candidate,
     trace: &kinference_policy::engine::Trace,
@@ -191,15 +191,16 @@ fn log_winner(
     };
     // `path` is logged empty rather than omitted when nothing is rewritten.
     tracing::debug!(
-        inference_pool = %pool,
+        req = %req_label,
+        pool = %pool,
         backend = %candidate.backend,
         class = %candidate.backend_type().as_str(),
         endpoint = %endpoint,
         path = %path,
         predicted_ms = %objective,
         model = %candidate.upstream_model,
-        trace = %trace.summary(),
-        "policy chose a candidate"
+        "policy: {}",
+        trace.summary()
     );
 }
 
@@ -295,8 +296,6 @@ pub struct KinferenceService {
     pub(crate) policy: Option<Arc<PolicyStore>>,
     /// The metrics kinference publishes on its own `/metrics`.
     pub(crate) prom: Arc<RouterMetrics>,
-    /// Unknown `InferencePool`s that requests have named, so each logs once.
-    unknown_pools: WarnOnce<String>,
 }
 
 /// What the control plane publishes and the router reads.
@@ -341,7 +340,6 @@ impl KinferenceService {
             observations,
             policy,
             prom,
-            unknown_pools: WarnOnce::default(),
         }
     }
 
@@ -358,6 +356,13 @@ impl KinferenceService {
     ) -> Result<Arc<Self>, Error> {
         let prom = Arc::new(RouterMetrics::new(registry, &config.metrics));
         let limits = config.bodies;
+        tracing::info!(
+            max_total_bytes = limits.max_total_bytes,
+            max_request_bytes = limits.max_request_bytes,
+            ttl_secs = limits.ttl.as_secs(),
+            idle_timeout_secs = limits.idle_timeout.as_secs(),
+            "Body buffer configured"
+        );
         let store =
             body_store::shared(limits.max_total_bytes, limits.max_request_bytes, limits.ttl);
         let tokenizer = tokenizer::build(
@@ -396,7 +401,14 @@ impl KinferenceService {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = interval.tick() => {
-                        self.bodies.sweep();
+                        let (reaped, bytes) = self.bodies.sweep();
+                        if reaped > 0 {
+                            tracing::debug!(
+                                reaped,
+                                bytes,
+                                "body_store sweep: reclaimed buffered bodies past TTL"
+                            );
+                        }
                     }
                 }
             }
@@ -417,14 +429,14 @@ impl KinferenceService {
                         if evicted > 0 {
                             tracing::debug!(
                                 evicted,
-                                "evicted expired observations"
+                                "pending_observations sweep: evicted entries past TTL (inflight state released)"
                             );
                         }
                         let dropped = self.observations.provider_health.sweep();
                         if dropped > 0 {
                             tracing::debug!(
                                 dropped,
-                                "dropped idle provider health entries"
+                                "provider health sweep: dropped providers with no live samples or failures"
                             );
                         }
                     }
@@ -444,10 +456,7 @@ impl KinferenceService {
             let id = match getrandom::getrandom(&mut buf) {
                 Ok(()) => u64::from_le_bytes(buf),
                 Err(e) => {
-                    tracing::error!(
-                        error = &e as &dyn std::error::Error,
-                        "getrandom failed while minting a response_id"
-                    );
+                    tracing::error!(error = %e, "getrandom failed while minting a response_id");
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_nanos() as u64)
@@ -630,6 +639,7 @@ pub fn first_served_upstream(
 /// the model had a usable worker.
 fn best_group(
     groups: Vec<ScoredGroup>,
+    req_label: &str,
     // `Option` so tests can omit it. Predictions are recorded here, where
     // they are computed per endpoint.
     prom: Option<&crate::metrics::RouterMetrics>,
@@ -665,10 +675,11 @@ fn best_group(
         };
         if multi {
             tracing::debug!(
-                workerset = %group.pool.name,
+                req = %req_label,
+                pool = %group.pool.name,
                 endpoints = group.scores.len(),
                 best_predicted_wait_ms = wait,
-                "scored a worker set"
+                "pick: pool candidate"
             );
         }
         // Strictly-better keeps the first pool on a tie, and `serving` is in
@@ -679,10 +690,12 @@ fn best_group(
     }
     let (wait, group) = best?;
     if multi {
-        tracing::debug!(
-            workerset = %group.pool.name,
+        tracing::info!(
+            req = %req_label,
+            pool = %group.pool.name,
+            model = %group.model,
             predicted_wait_ms = wait,
-            "chose a worker set"
+            "pick: chose worker set among several serving the model"
         );
     }
     Some(group)

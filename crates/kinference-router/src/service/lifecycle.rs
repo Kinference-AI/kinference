@@ -18,6 +18,8 @@ struct PickRequest<'a> {
     body: &'a [u8],
     request_id: u64,
     client_request_id: Option<&'a str>,
+    /// For logs: the client's id, else ours.
+    label: String,
     qos: Qos,
     pool_ref: Option<&'a kinference_policy::PoolRef>,
     identity: &'a kinference_policy::RequestIdentity,
@@ -133,6 +135,9 @@ impl KinferenceService {
             body,
             request_id,
             client_request_id,
+            label: client_request_id
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| request_id.to_string()),
             qos,
             pool_ref,
             identity,
@@ -146,7 +151,6 @@ impl KinferenceService {
             Ok(r) => r,
             Err(out) => return out,
         };
-        tracing::Span::current().record("model", resolved.model.as_str());
         let scored = self.score_groups(&req, resolved).await;
         let selected = match self.select(&req, scored).await {
             Ok(s) => s,
@@ -226,12 +230,19 @@ impl KinferenceService {
                 .choose_model_for_auto(messages.map(|m| m.as_slice()).unwrap_or(&[]))
             {
                 Some(chosen) => {
-                    tracing::debug!(to_model = %chosen, "resolved the auto model");
+                    tracing::info!(
+                        req = %req.label,
+                        chosen_model = %chosen,
+                        "auto: resolved pseudo-model to concrete model"
+                    );
                     model = chosen.clone();
                     force_model = Some(chosen);
                 }
                 None => {
-                    tracing::debug!("no model to resolve auto to");
+                    tracing::info!(
+                        req = %req.label,
+                        "auto: no candidate models available yet (cold start?)"
+                    );
                     return Err(PickAndRecordOutcome::NoWorkers { model });
                 }
             }
@@ -254,10 +265,11 @@ impl KinferenceService {
         if serving.is_empty()
             && let Some(upstream) = self.resolve_alias(req.pool_ref, &model)
         {
-            tracing::debug!(
+            tracing::info!(
+                req = %req.label,
                 alias = %model,
-                to_model = %upstream,
-                "resolved an alias"
+                upstream_model = %upstream,
+                "pick: resolved declared alias to an upstream model"
             );
             // Drives the body rewrite below, as for `auto`.
             force_model = Some(upstream.clone());
@@ -269,10 +281,18 @@ impl KinferenceService {
         // the named pool, so check before refusing.
         if serving.is_empty() {
             if !self.provider_serves(req.pool_ref, &model) {
-                tracing::debug!(model = %model, "no worker set serves the model");
+                tracing::info!(
+                    req = %req.label,
+                    model = %model,
+                    "pick: no pool serves model (unknown model or cold-start before /v1/models)"
+                );
                 return Err(PickAndRecordOutcome::NoWorkers { model });
             }
-            tracing::debug!(model = %model, "only a provider serves the model");
+            tracing::debug!(
+                req = %req.label,
+                model = %model,
+                "pick: no local worker set serves this model, but a provider declares it"
+            );
         }
 
         // The Pick-time body rewrites: the resolved model, and
@@ -345,7 +365,14 @@ impl KinferenceService {
         if let Some(first) = serving.first() {
             let (outcome, score_side) = self
                 .scoring
-                .score_workers(&*self.tokenizer, first, &model, inputs, HashMap::new())
+                .score_workers(
+                    &*self.tokenizer,
+                    first,
+                    &model,
+                    inputs,
+                    HashMap::new(),
+                    Some(&req.label),
+                )
                 .await;
             match outcome {
                 ScoreOutcome::Ok(resp) => groups.push(ScoredGroup {
@@ -355,6 +382,13 @@ impl KinferenceService {
                     side: score_side,
                 }),
                 ScoreOutcome::Unavailable(resp, why) => {
+                    tracing::warn!(
+                        req = %req.label,
+                        model = %model,
+                        pool = %first.name,
+                        reason = why.as_label(),
+                        "pick: no prefix-cache signal; picking on load metrics only"
+                    );
                     self.prom.record_score_degraded(why.as_label());
                     degraded = Some(why.reason().to_string());
                     groups.push(ScoredGroup {
@@ -367,6 +401,13 @@ impl KinferenceService {
                 // Not fatal: another pool or a provider may serve the model.
                 ScoreOutcome::NoWorkers => {}
             }
+        } else {
+            // Normal for a provider-only model.
+            tracing::debug!(
+                req = %req.label,
+                model = %model,
+                "pick: no local group to score; the decision rests entirely with the policy"
+            );
         }
 
         // The remaining pools serving this model, reusing the first group's
@@ -386,7 +427,14 @@ impl KinferenceService {
                 };
                 let (outcome, side) = self
                     .scoring
-                    .score_workers(&*self.tokenizer, pool, &model, input, HashMap::new())
+                    .score_workers(
+                        &*self.tokenizer,
+                        pool,
+                        &model,
+                        input,
+                        HashMap::new(),
+                        Some(&req.label),
+                    )
                     .await;
                 let scores = match outcome {
                     ScoreOutcome::Ok(r) => r.scores,
@@ -448,13 +496,17 @@ impl KinferenceService {
         // pool records none, but is counted under
         // `kinference_policy_decisions_total`.
         let policy = self.policy_for(req);
-        let winner = best_group(groups, policy.is_none().then_some(&*self.prom));
+        let winner = best_group(groups, &req.label, policy.is_none().then_some(&*self.prom));
 
         // No pool named, or policy disabled: the ranking decided, and providers
         // are unreachable.
         let Some((pref, store)) = policy else {
             let Some(group) = winner else {
-                tracing::debug!("no ready worker serves the model");
+                tracing::info!(
+                    req = %req.label,
+                    model = %model,
+                    "pick: no workers serve model"
+                );
                 return Err(PickAndRecordOutcome::NoWorkers { model });
             };
             return Ok(Selected::Local {
@@ -495,7 +547,7 @@ impl KinferenceService {
         // Re-bind to the winning group, whose pool's scores and prefix hashes
         // the critical section uses.
         let (group, endpoint) = match self
-            .policy_select(pref, store, winner, &model, spare, attrs)
+            .policy_select(pref, store, winner, &model, spare, attrs, &req.label)
             .await
         {
             // An off-cluster destination: nothing pool-scoped applies. Rewrite
@@ -504,20 +556,25 @@ impl KinferenceService {
             Ok(PolicySelection::Provider(pick)) => {
                 if !body.name_model(req.body, &pick.upstream_model) {
                     tracing::error!(
+                        req = %req.label,
+                        from_model = %model,
                         to_model = %pick.upstream_model,
                         provider = %pick.provider.label(),
-                        "could not rewrite the body for the provider; refusing"
+                        "policy: chose a provider but the body could not be rewritten; \
+                         refusing rather than sending a model the vendor does not know"
                     );
                     return Err(PickAndRecordOutcome::BadRequest {
                         reason: "could not rewrite body model for the chosen provider".to_string(),
                         model,
                     });
                 }
-                tracing::debug!(
+                tracing::info!(
+                    req = %req.label,
                     provider = %pick.provider.label(),
                     backend = %pick.backend_ref.label(),
+                    from_model = %model,
                     to_model = %pick.upstream_model,
-                    "routing to a provider"
+                    "policy: routing off-cluster"
                 );
                 return Ok(Selected::Provider {
                     pick,
@@ -529,7 +586,11 @@ impl KinferenceService {
             Ok(PolicySelection::Picker { group: Some(group) }) => (group, None),
             Ok(PolicySelection::Picker { group: None }) => {
                 // Nothing local was scored and no provider chosen.
-                tracing::debug!("policy chose no destination");
+                tracing::info!(
+                    req = %req.label,
+                    model = %model,
+                    "pick: no local group and no provider chosen"
+                );
                 return Err(PickAndRecordOutcome::NoWorkers { model });
             }
             Err(outcome) => return Err(outcome),
@@ -542,8 +603,11 @@ impl KinferenceService {
                 // than forward a body naming a model the chosen endpoint does
                 // not serve.
                 tracing::error!(
+                    req = %req.label,
+                    from_model = %model,
                     to_model = %group.model,
-                    "could not rewrite the body for the chosen model; refusing"
+                    "policy: chose a different model but the body could not be \
+                     rewritten; refusing rather than sending a mismatched model"
                 );
                 return Err(PickAndRecordOutcome::BadRequest {
                     reason: "could not rewrite body model for the chosen candidate".to_string(),
@@ -551,8 +615,10 @@ impl KinferenceService {
                 });
             }
             tracing::debug!(
+                req = %req.label,
+                from_model = %model,
                 to_model = %group.model,
-                "rewriting the body's model"
+                "policy: rewriting the body's model to the chosen one"
             );
         }
         Ok(Selected::Local {
@@ -624,8 +690,11 @@ impl KinferenceService {
             // section, and the state it touches is TTL-swept.
             let _pick_guard = pick_lock.lock().unwrap_or_else(|poisoned| {
                 tracing::warn!(
+                    req = %req.label,
                     workerset = %pool.name,
-                    "pick lock poisoned by an earlier panic; continuing"
+                    "pick_lock was poisoned by an earlier panic; continuing. The lock \
+                     guards ordering only, so this is recoverable — but a panic inside \
+                     the pick critical section is a bug worth chasing"
                 );
                 poisoned.into_inner()
             });
@@ -732,10 +801,13 @@ impl KinferenceService {
                     // this group's scores. Warn, since the decision counter
                     // already recorded `chosen`.
                     tracing::warn!(
-                        workerset = %pool.name,
+                        req = %req.label,
+                        model = %model,
+                        worker_set = %pool.name,
                         endpoint = %ep,
-                        scored = scores.len(),
-                        "policy chose an unscored endpoint; using the picker"
+                        n_scored = scores.len(),
+                        "pick: policy chose an endpoint absent from the scored set; \
+                         falling back to the picker"
                     );
                     self.prom.record_policy_decision("forced_endpoint_missing");
                 }
@@ -747,7 +819,12 @@ impl KinferenceService {
                 None => match crate::picker::pick_endpoint(&inputs) {
                     Some(r) => r,
                     None => {
-                        tracing::warn!(scored = scores.len(), "picker found no eligible worker");
+                        tracing::warn!(
+                            req = %req.label,
+                            model = %model,
+                            n_scored = scores.len(),
+                            "pick: picker returned None (defensive); reporting BadRequest"
+                        );
                         return PickAndRecordOutcome::BadRequest {
                             reason: "picker returned no eligible worker".to_string(),
                             model: model.clone(),
@@ -759,21 +836,24 @@ impl KinferenceService {
             let chosen_idx = pick_result.index;
             let replication_fired = pick_result.replication_fired;
 
-            if tracing::enabled!(tracing::Level::TRACE) {
-                tracing::trace!(
-                    table = %crate::picker::format_score_table(
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                tracing::debug!(
+                    "pick: score table for req={}\n{}",
+                    req.label,
+                    crate::picker::format_score_table(
                         &inputs,
                         expected_overlap_alpha,
                         Some(&chosen.endpoint),
-                    ),
-                    "score table"
+                    )
                 );
             }
-            tracing::debug!(
-                endpoint = %chosen.endpoint,
-                worker_id = %chosen.name,
+            tracing::info!(
+                req = %req.label,
+                model = %model,
+                chosen_endpoint = %chosen.endpoint,
+                chosen_name = %chosen.name,
                 scored = scores.len(),
-                "picked an endpoint"
+                "pick"
             );
 
             let chosen_inflight = inflight_per_worker[chosen_idx];

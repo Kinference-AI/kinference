@@ -11,7 +11,6 @@
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -525,8 +524,6 @@ pub fn format_csv_row(
 /// - Every row is flushed.
 pub struct ObservationSink {
     inner: Option<Mutex<BufWriter<std::fs::File>>>,
-    /// Whether the last write failed, so a failing sink logs once.
-    failing: AtomicBool,
 }
 
 impl ObservationSink {
@@ -534,7 +531,7 @@ impl ObservationSink {
     /// startup by `Config::load`); see the type docs for the cases.
     pub(crate) fn open(path: Option<PathBuf>) -> Self {
         let Some(path) = path else {
-            return Self::with(None);
+            return Self { inner: None };
         };
         match OpenOptions::new().create(true).append(true).open(&path) {
             Ok(f) => {
@@ -542,41 +539,43 @@ impl ObservationSink {
                 // race.
                 let is_empty = f.metadata().map(|m| m.len() == 0).unwrap_or(false);
                 let mut writer = BufWriter::new(f);
-                // Best-effort: on failure, keep recording data rows.
-                if is_empty
-                    && let Err(e) = writer
+                if is_empty {
+                    // Best-effort: on failure, keep recording data rows.
+                    if let Err(e) = writer
                         .write_all(CSV_HEADER.as_bytes())
                         .and_then(|_| writer.write_all(b"\n"))
                         .and_then(|_| writer.flush())
-                {
-                    tracing::warn!(
+                    {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "failed to write CSV header; \
+                             continuing with data-only sink"
+                        );
+                    } else {
+                        tracing::info!(
+                            path = %path.display(),
+                            "observation sink enabled (new file; header written)"
+                        );
+                    }
+                } else {
+                    tracing::info!(
                         path = %path.display(),
-                        error = &e as &dyn std::error::Error,
-                        "failed to write the observation CSV header"
+                        "observation sink enabled (appending to existing file)"
                     );
                 }
-                tracing::info!(
-                    path = %path.display(),
-                    appending = !is_empty,
-                    "observation sink enabled"
-                );
-                Self::with(Some(Mutex::new(writer)))
+                Self {
+                    inner: Some(Mutex::new(writer)),
+                }
             }
             Err(e) => {
                 tracing::warn!(
                     path = %path.display(),
-                    error = &e as &dyn std::error::Error,
-                    "failed to open the observation sink"
+                    error = %e,
+                    "failed to open observation sink; CSV disabled"
                 );
-                Self::with(None)
+                Self { inner: None }
             }
-        }
-    }
-
-    fn with(inner: Option<Mutex<BufWriter<std::fs::File>>>) -> Self {
-        Self {
-            inner,
-            failing: AtomicBool::new(false),
         }
     }
 
@@ -586,26 +585,16 @@ impl ObservationSink {
         let Some(mu) = self.inner.as_ref() else {
             return;
         };
-        // A panic mid-write leaves at most one partial row.
-        let mut w = mu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Ok(mut w) = mu.lock() else {
+            tracing::warn!("observation sink mutex poisoned; skipping write");
+            return;
+        };
         let res = w
             .write_all(line.as_bytes())
             .and_then(|_| w.write_all(b"\n"))
             .and_then(|_| w.flush());
-        match res {
-            Ok(()) => {
-                if self.failing.load(Ordering::Relaxed) {
-                    self.failing.store(false, Ordering::Relaxed);
-                }
-            }
-            Err(e) => {
-                if !self.failing.swap(true, Ordering::Relaxed) {
-                    tracing::warn!(
-                        error = &e as &dyn std::error::Error,
-                        "observation sink write failed"
-                    );
-                }
-            }
+        if let Err(e) = res {
+            tracing::warn!(error = %e, "observation sink write failed");
         }
     }
 }
@@ -770,7 +759,7 @@ impl Observations {
             itl_layout = report.itl_bucket_layout,
             itl_buckets = report.itl_bucket_counts.len(),
             known = meta.is_some(),
-            "final token reported"
+            "report_final_token"
         );
         // End-to-end duration, when we know when the pick happened.
         if let Some(m) = &meta {
@@ -815,7 +804,8 @@ impl Observations {
                 provider = %provider.label(),
                 reason = kind.as_str(),
                 detail,
-            "suppressing a provider after repeated dispatch failures"
+                "provider: suppressing candidates after repeated dispatch failures. \
+                 kinference cannot see the GatewayBackend, so this is the caller's report"
             );
         }
     }
@@ -838,9 +828,20 @@ impl Observations {
         // Always release in-flight bookkeeping, streaming or not.
         release_inflight_state(&record);
 
+        let req_label_owned = record
+            .external_request_id
+            .clone()
+            .unwrap_or_else(|| record.request_id.to_string());
+
         // For non-streaming responses `observed_ttft_ms` is the full response
         // time, not TTFT, so skip the CSV row and residual log.
         if !record.streaming {
+            tracing::debug!(
+                req = %req_label_owned,
+                endpoint = %record.chosen_worker.endpoint,
+                status = upstream_status,
+                "observation skipped: non-streaming response (reported time is total latency, not TTFT)"
+            );
             return true;
         }
 
@@ -855,14 +856,13 @@ impl Observations {
         let predicted_ms = record.prediction.total_ms();
         let residual_ms = observed_ttft_ms as f32 - predicted_ms;
         tracing::debug!(
-            req = record.external_request_id.as_deref().unwrap_or("-"),
-            response_id = record.request_id,
+            req = %req_label_owned,
             endpoint = %record.chosen_worker.endpoint,
-            predicted_ms,
+            predicted_ms = format!("{predicted_ms:.1}"),
             observed_ms = observed_ttft_ms,
-            residual_ms,
+            residual_ms = format!("{residual_ms:+.1}"),
             status = upstream_status,
-            "first token observed"
+            "observation"
         );
 
         self.sink.append_line(&format_csv_row(
@@ -883,6 +883,15 @@ impl Observations {
             return false;
         };
         release_inflight_state(&record);
+        let req_label_owned = record
+            .external_request_id
+            .clone()
+            .unwrap_or_else(|| record.request_id.to_string());
+        tracing::debug!(
+            req = %req_label_owned,
+            endpoint = %record.chosen_worker.endpoint,
+            "abort: cleared inflight/inflight-prefix state without CSV emit"
+        );
         true
     }
 

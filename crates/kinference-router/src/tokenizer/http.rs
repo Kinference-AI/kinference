@@ -75,6 +75,7 @@ impl HttpRender {
             model,
             ref input,
             raw_body,
+            req_id,
             ..
         } = req;
         // A configured `render_url` (typically a Service) replaces the
@@ -89,9 +90,10 @@ impl HttpRender {
             let render_ms = started.elapsed().as_secs_f64() * 1000.0;
             match result {
                 Ok(tokens) => {
-                    tracing::trace!(
+                    tracing::debug!(
+                        req = %req_id.unwrap_or("-"),
                         mode = "render",
-                        url = %url,
+                        tokenize_url = %url,
                         attempt = 1,
                         render_ms = format_args!("{render_ms:.1}"),
                         token_count = tokens.len(),
@@ -101,6 +103,12 @@ impl HttpRender {
                 }
                 Err(e) => {
                     let err = e.chain();
+                    tracing::warn!(
+                        tokenize_url = url,
+                        render_ms = format_args!("{render_ms:.1}"),
+                        error = %err,
+                        "render via the worker set's render_url failed; failing fast (no per-worker fallback)"
+                    );
                     return TokenizeOutcome::Unavailable {
                         reason: format!("render_url={url} failed: {err}"),
                         attempts: 1,
@@ -134,7 +142,7 @@ impl HttpRender {
         let do_attempts = async {
             let mut last_err: Option<String> = None;
             for (i, (_num, worker_id_str, url)) in candidates.iter().enumerate() {
-                // Timed per call, logged at TRACE.
+                // Timed per call, logged at DEBUG.
                 let render_start = std::time::Instant::now();
                 let result = match raw_body {
                     Some(body) => render_via_vllm_raw(&self.client, url, body).await,
@@ -143,9 +151,10 @@ impl HttpRender {
                 let render_ms = render_start.elapsed().as_secs_f64() * 1000.0;
                 match result {
                     Ok(tokens) => {
-                        tracing::trace!(
+                        tracing::debug!(
+                            req = %req_id.unwrap_or("-"),
                             mode = "render",
-                            url = %url,
+                            http_url = %url,
                             attempt = i + 1,
                             render_ms = format_args!("{render_ms:.1}"),
                             token_count = tokens.len(),
@@ -155,14 +164,14 @@ impl HttpRender {
                     }
                     Err(e) => {
                         let err_string = e.chain();
-                        tracing::debug!(
+                        tracing::warn!(
                             worker_id = %worker_id_str,
-                            url = %url,
+                            http_url = %url,
                             attempt = i + 1,
-                            attempts,
+                            of_attempts = attempts,
                             render_ms = format_args!("{render_ms:.1}"),
-                            error = &e as &dyn std::error::Error,
-                            "render failed; trying the next worker"
+                            error = %err_string,
+                            "render failed; falling back to next worker"
                         );
                         last_err = Some(err_string);
                     }

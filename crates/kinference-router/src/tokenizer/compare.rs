@@ -9,17 +9,12 @@ use super::http::HttpRender;
 use super::local::LocalTokenizer;
 use super::{TokenizeInput, TokenizeOutcome, TokenizeRequest, Tokenizer};
 use crate::metrics::RouterMetrics;
-use crate::warn_once::WarnOnce;
 
 #[derive(Clone)]
 pub(crate) struct Compare {
     http: Arc<HttpRender>,
     local: Arc<LocalTokenizer>,
     prom: Arc<RouterMetrics>,
-    /// Models that have diverged, so each logs its first divergence only.
-    diverged: Arc<WarnOnce<String>>,
-    /// Models that have failed locally, so each logs its first failure only.
-    failed: Arc<WarnOnce<String>>,
 }
 
 impl Compare {
@@ -28,13 +23,7 @@ impl Compare {
         local: Arc<LocalTokenizer>,
         prom: Arc<RouterMetrics>,
     ) -> Self {
-        Self {
-            http,
-            local,
-            prom,
-            diverged: Arc::default(),
-            failed: Arc::default(),
-        }
+        Self { http, local, prom }
     }
 
     /// `/render`, then the comparison in the background so local template
@@ -62,9 +51,6 @@ impl Compare {
             }
             Ok(local_tokens) => {
                 self.prom.record_tokenize_compare("divergence");
-                if !self.diverged.first(model) {
-                    return;
-                }
                 let first_diff = http_tokens
                     .iter()
                     .zip(local_tokens.iter())
@@ -102,18 +88,16 @@ impl Compare {
                     local_window = ?local_win,
                     http_text = %http_text,
                     local_text = %local_text,
-                    "local tokens differ from /render"
+                    "local_tokenize divergence — in-process result differs from /render"
                 );
             }
             Err(e) => {
                 self.prom.record_tokenize_compare("error");
-                if self.failed.first(model) {
-                    tracing::warn!(
-                        model,
-                        error = &e as &dyn std::error::Error,
-                        "local tokenize failed"
-                    );
-                }
+                tracing::warn!(
+                    model,
+                    error = &e as &dyn std::error::Error,
+                    "local_tokenize failed; HTTP result returned unchanged"
+                );
             }
         }
     }
