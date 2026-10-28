@@ -659,10 +659,7 @@ async fn a_model_without_a_chat_template_falls_back_to_render() {
         out.contains(r#"kinference_tokenize_total{path="local"} 0"#),
         "{out}"
     );
-    assert!(
-        local.warn_latch.contains_key("m"),
-        "warned once for the model"
-    );
+    assert!(!local.failed.first("m"), "warned once for the model");
 }
 
 /// When the fallback fails too, nothing is counted as a success.

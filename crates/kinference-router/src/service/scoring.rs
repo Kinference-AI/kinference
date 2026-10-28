@@ -19,6 +19,8 @@ pub(crate) struct Scoring {
     pub(crate) models: Arc<ModelIndex>,
     /// The fleet's scrape samples and `/v1/models` answers.
     pub(crate) scrape: Arc<MetricsRegistry>,
+    /// Which pools are degraded, and why, so each cause logs once.
+    degraded: WarnOnce<(kinference_policy::PoolId, Degraded)>,
 }
 
 impl Scoring {
@@ -31,6 +33,7 @@ impl Scoring {
             pools,
             models,
             scrape,
+            degraded: WarnOnce::default(),
         }
     }
 
@@ -95,7 +98,6 @@ impl Scoring {
         model: &str,
         input: ScoreInput,
         chat_kwargs: HashMap<String, String>,
-        req_id: Option<&str>,
     ) -> (ScoreOutcome, ScoreSideData) {
         let mut side = ScoreSideData {
             tokens: Vec::new(),
@@ -159,17 +161,22 @@ impl Scoring {
                     model,
                     input: tok_input,
                     raw_body: raw_body.as_deref(),
-                    req_id,
                 };
                 match tokenizer.tokenize(tok_req).await {
-                    crate::tokenizer::TokenizeOutcome::Ok(tokens) => tokens,
+                    crate::tokenizer::TokenizeOutcome::Ok(tokens) => {
+                        self.degraded.clear(&(pool.id, Degraded::Tokenize));
+                        tokens
+                    }
                     crate::tokenizer::TokenizeOutcome::Unavailable { reason, attempts } => {
-                        tracing::error!(
-                            model = model,
-                            attempts,
-                            reason = %reason,
-                            "tokenize unavailable across the fleet; returning degraded ScoreResponse"
-                        );
+                        if self.degraded.first(&(pool.id, Degraded::Tokenize)) {
+                            tracing::warn!(
+                                workerset = %pool.name,
+                                model,
+                                attempts,
+                                reason = %reason,
+                                "tokenize failed; picking on load alone"
+                            );
+                        }
                         let degraded = self.degraded_response(&workers);
                         return (
                             ScoreOutcome::Unavailable(degraded, Degraded::Tokenize),
@@ -201,28 +208,32 @@ impl Scoring {
             // them.
             let hashes_u64: Vec<u64> = hashes.iter().map(|h| h.0).collect();
 
-            tracing::debug!(
-                req = %req_id.unwrap_or("-"),
+            tracing::trace!(
                 block_size,
                 total_blocks,
                 first_tokens = ?tokens.iter().take(8).collect::<Vec<_>>(),
                 first_hashes = ?hashes_u64.iter().take(4).collect::<Vec<_>>(),
-                "score: computed block hashes"
+                "computed block hashes"
             );
 
             side.hashes_by_block_size.insert(block_size, hashes_u64);
 
             let overlap = match pool.indexer.find_matches(hashes).await {
-                Ok(o) => o,
+                Ok(o) => {
+                    self.degraded.clear(&(pool.id, Degraded::PrefixIndex));
+                    o
+                }
                 Err(e) => {
                     // Degrade to load-only, reported as a prefix-index (not
                     // tokenize) failure.
-                    tracing::error!(
-                        pool = %pool.name,
-                        block_size,
-                        error = %e,
-                        "prefix index query failed; degrading this pick to load-only"
-                    );
+                    if self.degraded.first(&(pool.id, Degraded::PrefixIndex)) {
+                        tracing::warn!(
+                            workerset = %pool.name,
+                            block_size,
+                            error = &e as &dyn std::error::Error,
+                            "prefix index query failed; picking on load alone"
+                        );
+                    }
                     let degraded = self.degraded_response(&workers);
                     return (
                         ScoreOutcome::Unavailable(degraded, Degraded::PrefixIndex),

@@ -291,7 +291,7 @@ impl BodyStore {
                         body = id,
                         bytes = entry.bytes,
                         req = entry.client_request_id.as_deref().unwrap_or("-"),
-                        "body_store: reclaimed a buffered body past TTL"
+                        "reclaimed an expired body"
                     );
                 }
                 self.release(entry.bytes);
@@ -359,7 +359,10 @@ impl BodyStore {
             let candidate = match getrandom::getrandom(&mut buf) {
                 Ok(()) => u64::from_le_bytes(buf),
                 Err(e) => {
-                    tracing::error!(error = %e, "getrandom failed while minting a body id");
+                    tracing::error!(
+                        error = &e as &dyn std::error::Error,
+                        "getrandom failed while minting a body id"
+                    );
                     // Wall-clock nanos: guessable, but this path is effectively
                     // unreachable and failing the push would be worse.
                     std::time::SystemTime::now()
@@ -394,8 +397,7 @@ impl Drop for ByteGuard {
 pub struct Reservation {
     store: Arc<BodyStore>,
     bytes: u64,
-    /// Rides along so `commit` can stamp it onto the entry, and so an
-    /// abandoned push is traceable in the Drop log.
+    /// Rides along so `commit` can stamp it onto the entry.
     client_request_id: Option<String>,
 }
 
@@ -421,15 +423,7 @@ impl Reservation {
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        let bytes = self.bytes;
-        if bytes > 0 {
-            tracing::debug!(
-                bytes,
-                req = self.client_request_id.as_deref().unwrap_or("-"),
-                "body_store: released an abandoned in-progress push"
-            );
-        }
-        self.store.release(bytes);
+        self.store.release(self.bytes);
     }
 }
 
@@ -677,15 +671,14 @@ impl Bodies {
     }
 
     /// Reclaim buffered bodies past their TTL, count them, and refresh the
-    /// buffer gauges. Returns `(entries, bytes)` freed.
-    pub(crate) fn sweep(&self) -> (usize, u64) {
-        let (reaped, bytes) = self.store.take_expired();
+    /// buffer gauges.
+    pub(crate) fn sweep(&self) {
+        let (reaped, _) = self.store.take_expired();
         if reaped > 0 {
             self.prom.record_bodies_reaped(reaped as u64);
         }
         let (entries, in_use) = self.store.stats();
         self.prom.set_body_buffer(entries as u64, in_use);
-        (reaped, bytes)
     }
 
     /// `PushBody` after its metadata is read: refuse on the declared length
@@ -708,10 +701,10 @@ impl Bodies {
             && let Err((status, reason)) = self.store.check_declared_length(declared)
         {
             self.prom.record_body_rejected(reason.as_label());
-            tracing::warn!(
+            tracing::debug!(
                 req = %req_label,
                 declared,
-                "push_body: refused on declared length"
+                "body refused on its declared length"
             );
             return Err(status);
         }
@@ -730,10 +723,10 @@ impl Bodies {
                     self.prom.record_body_rejected(reason.as_label());
                 }
                 let status = failure.into_status();
-                tracing::warn!(
+                tracing::debug!(
                     req = %req_label,
                     code = ?status.code(),
-                    "push_body: aborted before half-close; discarding"
+                    "body push failed"
                 );
                 return Err(status);
             }
@@ -742,12 +735,12 @@ impl Bodies {
         let total_bytes = buf.len() as u64;
         let stream_id = self.store.commit(reservation, buf);
         self.prom.record_body_pushed(total_bytes);
-        tracing::debug!(
+        tracing::trace!(
             req = %req_label,
             stream_id,
             total_bytes,
             elapsed_ms = started.elapsed().as_millis() as u64,
-            "push_body: buffered"
+            "body buffered"
         );
         Ok((stream_id, total_bytes))
     }

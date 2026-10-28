@@ -49,6 +49,7 @@ use futures::future::BoxFuture;
 use super::{TokenizeInput, TokenizeOutcome, TokenizeRequest};
 use crate::error::Error;
 use crate::metrics::RouterMetrics;
+use crate::warn_once::WarnOnce;
 use kinference_fleet::models::ModelClaim;
 use kinference_fleet::pool::{Pool, PoolRegistry};
 use kinference_fleet::profile::TokenizeMode;
@@ -126,9 +127,8 @@ pub struct LocalTokenizer {
     /// Concurrent first-loads of a model aren't deduplicated (only one
     /// result is kept), so without this each would log.
     hub_fallback_logged: DashMap<String, ()>,
-    /// Warn-once latch per model, since some models fail locally on every
-    /// request.
-    warn_latch: DashMap<String, ()>,
+    /// Models that fail locally, so each logs once.
+    failed: WarnOnce<String>,
     http: Arc<HttpRender>,
     prom: Arc<RouterMetrics>,
 }
@@ -152,7 +152,7 @@ impl LocalTokenizer {
             config,
             hub,
             hub_fallback_logged: DashMap::new(),
-            warn_latch: DashMap::new(),
+            failed: WarnOnce::default(),
             http,
             prom,
         })
@@ -176,7 +176,7 @@ impl LocalTokenizer {
                         Err(RecvError::Lagged(missed)) => {
                             tracing::warn!(
                                 missed,
-                                "tokenizer warmup fell behind; skipped models load on first request"
+                                "tokenizer warmup fell behind"
                             );
                             continue;
                         }
@@ -192,8 +192,7 @@ impl LocalTokenizer {
                         tracing::warn!(
                             model = %claim.model,
                             error = &err as &dyn std::error::Error,
-                            "tokenizer warmup failed; first request will pay the load cost or fall \
-                             back to HTTP /render"
+                            "tokenizer warmup failed"
                         );
                     }
                 });
@@ -205,10 +204,7 @@ impl LocalTokenizer {
     /// chat template, render or encode error) falls back.
     pub(crate) async fn encode_or_render(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
         let &TokenizeRequest {
-            model,
-            ref input,
-            req_id,
-            ..
+            model, ref input, ..
         } = req;
         let started = std::time::Instant::now();
         let result = self.encode(model, input).await;
@@ -216,8 +212,7 @@ impl LocalTokenizer {
         match result {
             Ok(tokens) => {
                 self.prom.record_tokenize_path("local");
-                tracing::debug!(
-                    req = %req_id.unwrap_or("-"),
+                tracing::trace!(
                     mode = "local",
                     model = %model,
                     render_ms = format_args!("{render_ms:.1}"),
@@ -227,11 +222,11 @@ impl LocalTokenizer {
                 TokenizeOutcome::Ok(tokens)
             }
             Err(e) => {
-                if self.warn_latch.insert(model.to_string(), ()).is_none() {
+                if self.failed.first(model) {
                     tracing::warn!(
                         model,
                         error = &e as &dyn std::error::Error,
-                        "local tokenize failed; falling back to HTTP /render"
+                        "local tokenize failed; using /render"
                     );
                 }
                 let outcome = self.http.render(req).await;
@@ -335,26 +330,24 @@ impl LocalTokenizer {
                 tracing::info!(
                     model = model_name,
                     path = %tok_path.display(),
-                    "local_tokenize: loading from mount"
+                    "loading the tokenizer from the mount"
                 );
                 let tokenizer =
                     Tokenizer::from_file(&tok_path).map_err(|source| Error::TokenizerFile {
                         path: tok_path.clone(),
                         source,
                     })?;
-                let meta = read_chat_template_from_config(&dir)
-                    .unwrap_or_else(|e| {
-                        tracing::debug!(
-                            model = model_name,
-                            error = &e as &dyn std::error::Error,
-                            "local_tokenize: no chat_template available from mount \
-                             (checked tokenizer_config.json::chat_template + sibling chat_template.jinja)"
-                        );
-                        TokenizerConfigMeta {
-                            chat_template: None,
-                            special_tokens: HashMap::new(),
-                        }
-                    });
+                let meta = read_chat_template_from_config(&dir).unwrap_or_else(|e| {
+                    tracing::debug!(
+                        model = model_name,
+                        error = &e as &dyn std::error::Error,
+                        "no chat template in the mount"
+                    );
+                    TokenizerConfigMeta {
+                        chat_template: None,
+                        special_tokens: HashMap::new(),
+                    }
+                });
                 return Ok(Arc::new(LoadedTokenizer {
                     tokenizer,
                     chat_template: meta.chat_template,
@@ -372,7 +365,7 @@ impl LocalTokenizer {
         {
             tracing::info!(
                 model = model_name,
-                "local_tokenize: mount miss, falling back to HuggingFace Hub"
+                "loading the tokenizer from the Hugging Face Hub"
             );
         }
         let model_name_owned = model_name.to_string();
@@ -394,7 +387,7 @@ impl LocalTokenizer {
                     tracing::debug!(
                         model = model_name,
                         error = &e as &dyn std::error::Error,
-                        "local_tokenize: no chat_template available via Hub"
+                        "no chat template on the Hub"
                     );
                     TokenizerConfigMeta {
                         chat_template: None,
