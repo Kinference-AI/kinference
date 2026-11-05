@@ -11,7 +11,7 @@ image:
   # Defaults to the chart's appVersion.
   tag: ""
   pullPolicy: IfNotPresent
-  pullSecrets: {}
+imagePullSecrets: []
 
 nodeSelector: {}
 
