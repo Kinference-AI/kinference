@@ -36,9 +36,9 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
-        {{ with .Values.image.pullSecrets }}
+        {{ with .Values.imagePullSecrets }}
         imagePullSecrets:
-          - {{- toYaml . | nindent 8 }}
+          {{- toYaml . | nindent 8 }}
         {{ end }}
         - name: kinference
           image: {{ include "kinference.image" . }}
