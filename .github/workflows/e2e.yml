@@ -29,8 +29,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     # The comment path reads the pull request and reacts to the comment.
+    # A reaction on a pull request comment needs pull-requests write.
     permissions:
-      pull-requests: read
+      pull-requests: write
       issues: write
     env:
       PR: ${{ github.event.pull_request.number || github.event.issue.number }}
@@ -65,8 +66,10 @@ jobs:
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
+      # Cosmetic, so a failure here must not stop the dispatch.
       - name: Acknowledge the comment
         if: github.event_name == 'issue_comment'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           COMMENT_ID: ${{ github.event.comment.id }}
