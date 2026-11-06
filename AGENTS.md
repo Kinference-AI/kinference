@@ -1,5 +1,26 @@
 # AGENTS.md
 
+## Commands
+
+CI runs the `just` recipes below, so run the same recipe locally before
+you push. `just` with no argument lists every recipe.
+
+- `just lint`: `cargo fmt --check`, `cargo clippy --all-targets` with
+  warnings denied, and `helm lint` on both charts.
+- `just test-unit`: `cargo test` at the workspace root. On the host it
+  needs `g++`, because the `zmq` crate compiles a bundled libzmq.
+- `just up`, `just test-smoke`, `just down`: build the image, create a
+  kind cluster with both charts installed, run a CPU dummy-weights vLLM
+  through `tests/e2e/smoke.sh`, and delete the cluster. The first image
+  build compiles the `dynamo-kv-router` git dependency and takes a while.
+- `just install-cli`: install `kinfctl` into `~/.cargo/bin`.
+
+The end-to-end suite lives in a separate repository and reports as the
+`e2e` check on a pull request. A push to a branch in this repository
+starts the suite. A pull request from a fork starts it when a maintainer
+comments `/e2e`. `docs/local-development.md` shows how to iterate against
+the kind cluster and how to read the observation events.
+
 ## Architecture
 
 `ARCHITECTURE.md` is the map of the server: how the code is grouped, which
