@@ -1,4 +1,5 @@
 /target
 .*.swp
 __pycache__/
-.claude/
+.claude/*
+!.claude/skills/
