@@ -92,6 +92,49 @@ pub(crate) struct ScoredGroup {
     pub model: String,
     pub scores: Vec<WorkerScore>,
     pub side: ScoreSideData,
+    /// The prompt's length under this model's tokenizer. `None` when the
+    /// render failed or nothing was rendered.
+    pub input_tokens: Option<i64>,
+    /// Why this group has no prefix signal, if it has none.
+    pub degraded: Option<Degraded>,
+}
+
+impl ScoredGroup {
+    /// The group for one scoring outcome, recording `score_degraded`. `None`
+    /// when no ready worker serves `model` on `pool`.
+    pub(crate) fn from_outcome(
+        pool: Arc<Pool>,
+        model: String,
+        outcome: ScoreOutcome,
+        side: ScoreSideData,
+        prom: &RouterMetrics,
+    ) -> Option<Self> {
+        let (scores, degraded) = match outcome {
+            ScoreOutcome::Ok(r) => (r.scores, None),
+            ScoreOutcome::Unavailable(r, why) => {
+                prom.record_score_degraded(why.as_label());
+                (r.scores, Some(why))
+            }
+            ScoreOutcome::NoWorkers => return None,
+        };
+        if scores.is_empty() {
+            return None;
+        }
+        let input_tokens = (!side.tokens.is_empty()).then_some(side.tokens.len() as i64);
+        Some(Self {
+            pool,
+            model,
+            scores,
+            side,
+            input_tokens,
+            degraded,
+        })
+    }
+
+    /// True when this group's render failed, so its model has no tokens.
+    pub(crate) fn render_failed(&self) -> bool {
+        self.degraded == Some(Degraded::Tokenize)
+    }
 }
 
 /// What the policy chose.
@@ -242,6 +285,8 @@ fn provider_candidates_for(
                     kv_cache_usage: None,
                     // Declared, not discovered.
                     context_window: context_window.map(|w| w as i64),
+                    // Never rendered; the fit check skips providers.
+                    input_tokens: None,
                     predicted_ttft_ms: None,
                     prefix_cache_hit_ratio: None,
                     queued_prompts: None,
@@ -270,6 +315,7 @@ fn provider_candidates_for(
 ///
 /// `WorkerScore.matched_blocks` carries the raw radix-tree match; α-decay
 /// layering happens later, inside the `pick_lock` critical section.
+#[derive(Default)]
 pub(crate) struct ScoreSideData {
     /// Block hashes, one list per block size. The pick path looks up the
     /// chosen worker's to record the pending prefix.
@@ -572,13 +618,33 @@ pub(crate) enum Input {
     Tokens(Vec<u32>),
 }
 
+/// A request body as the engine will receive it, and the model that it
+/// names.
+#[derive(Clone)]
+pub(crate) struct RawBody {
+    pub bytes: Vec<u8>,
+    pub model: String,
+}
+
+impl RawBody {
+    /// The bytes, naming `model`. A policy may score the request against a
+    /// model other than the one that the body names, and the render endpoint
+    /// refuses a model that it does not serve.
+    pub(crate) fn naming(self, model: &str) -> Vec<u8> {
+        if self.model == model {
+            return self.bytes;
+        }
+        crate::pick_body::rewrite_model(&self.bytes, model).unwrap_or(self.bytes)
+    }
+}
+
 /// What one `(pool, model)` is scored from.
 #[derive(Clone)]
 pub(crate) struct ScoreInput {
     pub input: Input,
     pub chat_extras: ChatExtras,
     /// The body `/render` sees. `None` with `Input::Tokens`.
-    pub raw_body: Option<Vec<u8>>,
+    pub raw_body: Option<RawBody>,
 }
 
 impl ScoreInput {

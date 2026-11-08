@@ -2,7 +2,9 @@
 //! worker entries that point at it.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::metrics::RouterMetrics;
 
@@ -15,8 +17,20 @@ use kinference_fleet::workers::WorkerEntry;
 pub(crate) enum Render {
     /// Every request tokenizes to these ids.
     Tokens(Vec<u32>),
+    /// As `Tokens`, after holding each request for this long, so that
+    /// overlapping requests show in [`FakeRender::peak_concurrency`].
+    Delayed(Vec<u32>, Duration),
     /// Every request gets a 500.
     Failing,
+    /// The answer for the model that the body names: these ids, or a 500
+    /// for `None` or an unlisted model.
+    PerModel(std::collections::BTreeMap<String, Option<Vec<u32>>>),
+    /// As `Tokens`, but a body that names `model` waits `delay` first.
+    SlowFor {
+        model: String,
+        delay: Duration,
+        ids: Vec<u32>,
+    },
     /// No worker has an `http_url`, so nothing is tried.
     Absent,
 }
@@ -33,6 +47,8 @@ pub(crate) struct Seen {
 pub(crate) struct FakeRender {
     base: String,
     requests: Arc<Mutex<Vec<Seen>>>,
+    /// The most requests that the fake held at once.
+    peak: Arc<AtomicUsize>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -45,6 +61,8 @@ impl FakeRender {
         let base = format!("http://{}", listener.local_addr().expect("local addr"));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let seen = requests.clone();
+        let peak = Arc::new(AtomicUsize::new(0));
+        let (held, high) = (Arc::new(AtomicUsize::new(0)), peak.clone());
         // Any path: a worker is POSTed `{http_url}/v1/chat/completions/render`.
         let app =
             axum::Router::new().fallback(move |uri: axum::http::Uri, body: axum::body::Bytes| {
@@ -53,14 +71,38 @@ impl FakeRender {
                     body: body.to_vec(),
                 });
                 let answer = answer.clone();
+                let (held, high) = (held.clone(), high.clone());
                 async move {
                     match answer {
                         Render::Tokens(ids) => {
                             axum::Json(serde_json::json!({ "token_ids": ids })).into_response()
                         }
+                        Render::Delayed(ids, delay) => {
+                            let now = held.fetch_add(1, Ordering::SeqCst) + 1;
+                            high.fetch_max(now, Ordering::SeqCst);
+                            tokio::time::sleep(delay).await;
+                            held.fetch_sub(1, Ordering::SeqCst);
+                            axum::Json(serde_json::json!({ "token_ids": ids })).into_response()
+                        }
                         Render::Failing => {
                             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "render down")
                                 .into_response()
+                        }
+                        Render::SlowFor { model, delay, ids } => {
+                            if model_in(&body) == model {
+                                tokio::time::sleep(delay).await;
+                            }
+                            axum::Json(serde_json::json!({ "token_ids": ids })).into_response()
+                        }
+                        Render::PerModel(answers) => {
+                            match answers.get(&model_in(&body)).cloned().flatten() {
+                                Some(ids) => axum::Json(serde_json::json!({ "token_ids": ids }))
+                                    .into_response(),
+                                None => {
+                                    (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "render down")
+                                        .into_response()
+                                }
+                            }
                         }
                         Render::Absent => unreachable!("no server is started for Absent"),
                     }
@@ -74,6 +116,7 @@ impl FakeRender {
         Self {
             base,
             requests,
+            peak,
             task,
         }
     }
@@ -90,6 +133,11 @@ impl FakeRender {
     /// Every request so far, oldest first.
     pub(crate) fn requests(&self) -> Vec<Seen> {
         self.requests.lock().expect("requests").clone()
+    }
+
+    /// The most requests that a `Delayed` fake held at once.
+    pub(crate) fn peak_concurrency(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
     }
 }
 
@@ -222,4 +270,12 @@ pub(crate) fn chat_input(text: &str) -> TokenizeInput {
         tool_choice: None,
         add_generation_prompt: true,
     }
+}
+
+/// The `model` that a render body names, or `""`.
+fn model_in(body: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("model")?.as_str().map(str::to_string))
+        .unwrap_or_default()
 }

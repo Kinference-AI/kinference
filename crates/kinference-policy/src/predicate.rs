@@ -635,6 +635,34 @@ impl CompiledRequestPredicate {
             .all(|(a, m)| m.eval(attrs.get(a).as_ref()))
     }
 
+    /// [`Self::matches`] with every `inputTokens` term taken as true, for a
+    /// request whose token count is not known yet.
+    pub fn may_match(&self, attrs: &RequestAttrs) -> bool {
+        self.terms
+            .iter()
+            .all(|(a, m)| *a == RequestAttr::InputTokens || m.eval(attrs.get(a).as_ref()))
+    }
+
+    /// [`Self::matches`] with `input_tokens` in place of the request's count,
+    /// for an exclusion guard evaluated against one candidate.
+    pub fn matches_with_input_tokens(
+        &self,
+        attrs: &RequestAttrs,
+        input_tokens: Option<i64>,
+    ) -> bool {
+        self.terms.iter().all(|(a, m)| match a {
+            RequestAttr::InputTokens => m.eval(input_tokens.map(AttrValue::Int).as_ref()),
+            _ => m.eval(attrs.get(a).as_ref()),
+        })
+    }
+
+    /// True when a term tests `inputTokens`.
+    pub fn tests_input_tokens(&self) -> bool {
+        self.terms
+            .iter()
+            .any(|(a, _)| *a == RequestAttr::InputTokens)
+    }
+
     /// True when this entry matches every request.
     ///
     /// So `matches: [{}]` is a catch-all, like omitting `matches`. Unlike
@@ -747,6 +775,9 @@ impl RequestAttrs {
 #[derive(Debug, Clone, Default)]
 pub struct CandidateAttrs {
     pub context_window: Option<i64>,
+    /// The prompt's length under this candidate's own tokenizer, for the
+    /// context-window fit. Not a predicate attribute.
+    pub input_tokens: Option<i64>,
     pub predicted_ttft_ms: Option<f64>,
     pub prefix_cache_hit_ratio: Option<f64>,
     /// Mean queued prompts over the scrape window. See
