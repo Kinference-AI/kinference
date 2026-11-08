@@ -101,22 +101,35 @@ a method whose typed result the next step consumes.
    `stream_options.include_usage`, so that the final usage block exists
    for the caller to report later. The service takes the chat-template
    inputs from the serialized body.
-3. Score the groups. For the first pool that serves the model,
+3. Score the groups. When the request names a pool that the policy
+   snapshot holds, this step scores nothing, and the policy scores in
+   step 4. Otherwise, for a pool that serves the model,
    `service::scoring::score_workers` takes the ready workers and tokenizes
    the prompt through the pool's tokenize mode: in process, through vLLM's
    `/render`, or both, compared. Then, for each block size in the pool, it
    hashes the tokens into blocks and matches the blocks against the pool's
    radix tree, which gives the cached-prefix overlap for each worker. The
-   last scrape sample gives each worker's load. If tokenizing fails
-   everywhere, scoring falls back to load alone rather than failing the
-   pick. The service scores any further pools that serve the model with
-   the same tokens.
+   last scrape sample gives each worker's load. A render tries up to three
+   workers. If all of them fail, scoring falls back to load alone rather
+   than failing the pick. The service scores any further pools that serve
+   the model with the same tokens, or on load alone after a failed render.
 4. Select. With no `InferencePool` named, or with policy disabled,
    `best_group` ranks the scored pools, and the winner's group goes on to
    the commit. With a pool named, `service::policy_driver::policy_select`
    runs the compiled `InferencePolicy` over a snapshot of pools, worker
-   sets and providers. It flattens the candidates per endpoint, applies
-   the exclusions, and ranks the rest. Ranking holds no pool lock, because
+   sets and providers. It first starts one render call for each upstream
+   model that a reachable route could use, all at once, with the body
+   naming that model. A route is reachable when its rule could match once
+   the prompt's token count is known, and no earlier rule is sure to match
+   without falling through. The policy then waits only for the renders
+   that it needs. When a rule tests `inputTokens`, the count comes from
+   the first render to finish. Each rule waits for its own models when the
+   policy reaches that rule. Renders that the pick never needed are
+   cancelled. The policy flattens the candidates per endpoint, fits each
+   local candidate against its endpoint's context window using that
+   model's own token count, applies the exclusions, and ranks the rest. A
+   candidate whose render failed is taken to fit, and the fit never
+   applies to a provider. Ranking holds no pool lock, because
    candidates may span pools, so the ranking's input may miss one
    concurrent pick. The winner is either a local group or a provider. If
    the policy chose a model other than the one that the body names, the
