@@ -8,6 +8,9 @@
 #
 # Every call for one request (PushBody, Pick, PullBody, the reports) must
 # reach the same replica: stream_id and response_id are process-local.
+{{- if and (gt (int .Values.replicaCount) 1) (not (dig "leader_election" "enabled" false (.Values.config | default dict))) }}
+{{- fail "replicaCount > 1 needs config.leader_election.enabled=true, or the replicas overwrite each other's CRD status" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
