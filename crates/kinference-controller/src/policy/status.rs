@@ -936,25 +936,33 @@ impl<A: ApiServer> StatusWriter<A> {
                                 self.on_demotion();
                             }
                         }
-                        // Elector gone. Hold the current state: promoting could
-                        // create a second writer, and demoting could leave none.
+                        // Elector gone. Nothing renews the lease now, so a
+                        // rival can claim it: stop writing.
                         Err(_) => {
                             leader_open = false;
-                            tracing::error!(
-                                "leader channel closed; keeping the last leadership state"
-                            );
+                            tracing::error!("leader channel closed; stopping writes");
                             self.prom.record_leader_election_error();
+                            if *self.leader.borrow() {
+                                self.prom.set_leader(false);
+                                self.on_demotion();
+                            }
                         }
                     }
                 }
                 _ = interval.tick() => {
-                    if !*self.leader.borrow() {
+                    if !self.leading() {
                         continue;
                     }
                     self.reconcile_once().await;
                 }
             }
         }
+    }
+
+    /// Whether this replica may write. A closed leader channel counts as
+    /// lost leadership.
+    fn leading(&self) -> bool {
+        self.leader.has_changed().is_ok() && *self.leader.borrow()
     }
 
     /// Drop the last-written cache on becoming leader.

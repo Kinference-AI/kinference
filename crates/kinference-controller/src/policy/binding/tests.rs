@@ -723,3 +723,23 @@ async fn shutdown_logs_no_error() {
     }
     assert_eq!(errors.load(std::sync::atomic::Ordering::Relaxed), 0);
 }
+
+/// A leader whose elector drops the leader channel stops writing.
+#[tokio::test(start_paused = true)]
+async fn a_closed_leader_channel_stops_writes() {
+    let api = Recorded::default();
+    let store = PolicyStore::new();
+    store.publish(listed_snapshot());
+    let (tx, rx) = watch::channel(true);
+    let w = BindingWriter::new(api.clone(), Some("infra".into()), store, ext(), rx);
+    drop(tx);
+
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn(w.run(cancel.clone()));
+    // Two ticks past the first.
+    tokio::time::sleep(std::time::Duration::from_secs(25)).await;
+    cancel.cancel();
+    task.await.expect("the writer does not panic");
+
+    assert!(api.writes().is_empty(), "wrote {:?}", api.writes());
+}
