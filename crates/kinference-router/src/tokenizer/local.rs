@@ -14,7 +14,8 @@
 //!    expose it. Honors `HUGGING_FACE_HUB_TOKEN` for gated models.
 //!
 //! Tokenizers are cached by model name for the process lifetime (sub-MB to
-//! ~10MB each).
+//! ~10MB each). A model whose load fails is not loaded again for a minute.
+//! Until then, its requests fall back to `/render` without a load.
 //!
 //! ## Chat-template rendering
 //!
@@ -36,8 +37,10 @@ use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use serde::Deserialize;
 use tokenizers::tokenizer::Tokenizer;
 use tokio::sync::broadcast;
@@ -117,16 +120,31 @@ struct TokenizerConfigMeta {
     special_tokens: HashMap<String, String>,
 }
 
+/// How long after a failed load the next request may load the model again.
+const LOAD_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+/// Most models with a slot. Model names can come from the client, so past
+/// this a failed load leaves no slot and is not backed off.
+const MAX_SLOTS: usize = 1024;
+
+/// A model's tokenizer, or why a request can't have it yet.
+enum Slot {
+    Loaded(Arc<LoadedTokenizer>),
+    /// One caller is loading it. Others fall back instead of loading too.
+    Loading,
+    /// The last load failed. No caller loads it again before `retry_at`.
+    Failed {
+        retry_at: Instant,
+    },
+}
+
 /// In-process tokenization, falling back to `/render` on any local failure.
 /// Owns the loaded tokenizers, lazily loaded per model, and their warm-up.
 pub struct LocalTokenizer {
-    loaded: DashMap<String, Arc<LoadedTokenizer>>,
+    slots: DashMap<String, Slot>,
+    retry_after: Duration,
     config: LocalTokenizeConfig,
     hub: reqwest::Client,
-    /// Log-once latch per model for "mount miss, falling back to Hub".
-    /// Concurrent first-loads of a model aren't deduplicated (only one
-    /// result is kept), so without this each would log.
-    hub_fallback_logged: DashMap<String, ()>,
     /// Models that fail locally, so each logs once.
     failed: WarnOnce<String>,
     http: Arc<HttpRender>,
@@ -148,10 +166,10 @@ impl LocalTokenizer {
                 source,
             })?;
         Ok(Self {
-            loaded: DashMap::new(),
+            slots: DashMap::new(),
+            retry_after: LOAD_RETRY_AFTER,
             config,
             hub,
-            hub_fallback_logged: DashMap::new(),
             failed: WarnOnce::default(),
             http,
             prom,
@@ -240,10 +258,13 @@ impl LocalTokenizer {
     }
 
     /// Load `model_name`'s tokenizer into the cache, so requests find it
-    /// warm. The caller logs errors and moves on.
+    /// warm. A load that is running or backing off counts as warm. The
+    /// caller logs errors and moves on.
     pub async fn warmup(&self, model_name: &str) -> Result<(), Error> {
-        let _ = self.get_or_load(model_name).await?;
-        Ok(())
+        match self.get_or_load(model_name).await {
+            Ok(_) | Err(Error::TokenizerLoading { .. } | Error::TokenizerBackoff { .. }) => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 
     /// Decode tokens back to text, for compare-mode divergence logs.
@@ -251,8 +272,10 @@ impl LocalTokenizer {
     /// `None` if the model isn't loaded; never triggers a Hub fetch. Keeps
     /// special tokens so control tokens show up in the log.
     pub fn decode(&self, model_name: &str, tokens: &[u32]) -> Option<String> {
-        let entry = self.loaded.get(model_name)?;
-        entry.tokenizer.decode(tokens, false).ok()
+        let Slot::Loaded(loaded) = &*self.slots.get(model_name)? else {
+            return None;
+        };
+        loaded.tokenizer.decode(tokens, false).ok()
     }
 
     /// Tokenize `input` against `model_name`'s tokenizer, in process only.
@@ -307,18 +330,46 @@ impl LocalTokenizer {
         }
     }
 
-    /// Return the cached tokenizer, or load it (possibly from the network)
-    /// and insert it. Concurrent first-loads may each load; one is kept.
+    /// Return the cached tokenizer, or load it (possibly from the network).
+    /// At most one load per model runs at a time, and a failed load is not
+    /// retried for `retry_after`. Meanwhile callers get an error at once.
     async fn get_or_load(&self, model_name: &str) -> Result<Arc<LoadedTokenizer>, Error> {
-        if let Some(entry) = self.loaded.get(model_name) {
-            return Ok(Arc::clone(entry.value()));
+        if let Some(slot) = self.slots.get(model_name)
+            && let Some(ready) = slot_state(&slot, model_name)
+        {
+            return ready;
         }
-        let loaded = self.load(model_name).await?;
-        Ok(self
-            .loaded
-            .entry(model_name.to_string())
-            .or_insert(loaded)
-            .clone())
+        match self.slots.entry(model_name.to_string()) {
+            Entry::Occupied(mut slot) => {
+                if let Some(ready) = slot_state(slot.get(), model_name) {
+                    return ready;
+                }
+                slot.insert(Slot::Loading);
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(Slot::Loading);
+            }
+        }
+        let mut claim = LoadClaim {
+            slots: &self.slots,
+            model: model_name,
+            settled: false,
+        };
+        let result = self.load(model_name).await;
+        match &result {
+            Ok(loaded) => claim.settle(Slot::Loaded(loaded.clone())),
+            Err(err) => {
+                tracing::debug!(
+                    model = model_name,
+                    error = err as &dyn StdError,
+                    "tokenizer load failed"
+                );
+                claim.settle(Slot::Failed {
+                    retry_at: Instant::now() + self.retry_after,
+                });
+            }
+        }
+        result
     }
 
     async fn load(&self, model_name: &str) -> Result<Arc<LoadedTokenizer>, Error> {
@@ -331,22 +382,13 @@ impl LocalTokenizer {
             .await
             .map_err(Error::Join)??;
             if let Some(loaded) = mounted {
+                tracing::info!(model = model_name, source = "mount", "tokenizer loaded");
                 return Ok(Arc::new(loaded));
             }
         }
 
         // Fallback: HuggingFace Hub, on `spawn_blocking` since
         // `from_pretrained` blocks.
-        if self
-            .hub_fallback_logged
-            .insert(model_name.to_string(), ())
-            .is_none()
-        {
-            tracing::info!(
-                model = model_name,
-                "loading the tokenizer from the Hugging Face Hub"
-            );
-        }
         let model_name_owned = model_name.to_string();
         let params = tokenizers::FromPretrainedParameters {
             token: self.config.hub_token.clone(),
@@ -377,11 +419,53 @@ impl LocalTokenizer {
                         special_tokens: HashMap::new(),
                     }
                 });
+        tracing::info!(model = model_name, source = "hub", "tokenizer loaded");
         Ok(Arc::new(LoadedTokenizer {
             tokenizer,
             chat_template: meta.chat_template,
             special_tokens: meta.special_tokens,
         }))
+    }
+}
+
+/// What a request gets from `slot` without loading: the tokenizer, or an
+/// error while a load runs or backs off. `None` when the caller should load.
+fn slot_state(slot: &Slot, model_name: &str) -> Option<Result<Arc<LoadedTokenizer>, Error>> {
+    let model = || model_name.to_string();
+    match slot {
+        Slot::Loaded(loaded) => Some(Ok(loaded.clone())),
+        Slot::Loading => Some(Err(Error::TokenizerLoading { model: model() })),
+        Slot::Failed { retry_at } if Instant::now() < *retry_at => {
+            Some(Err(Error::TokenizerBackoff { model: model() }))
+        }
+        Slot::Failed { .. } => None,
+    }
+}
+
+/// The right to load one model. Dropped unsettled, as when the request is
+/// cancelled mid-load, it clears the slot so that the next request loads.
+struct LoadClaim<'a> {
+    slots: &'a DashMap<String, Slot>,
+    model: &'a str,
+    settled: bool,
+}
+
+impl LoadClaim<'_> {
+    fn settle(&mut self, slot: Slot) {
+        self.settled = true;
+        if matches!(slot, Slot::Failed { .. }) && self.slots.len() > MAX_SLOTS {
+            self.slots.remove(self.model);
+            return;
+        }
+        self.slots.insert(self.model.to_string(), slot);
+    }
+}
+
+impl Drop for LoadClaim<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.slots.remove(self.model);
+        }
     }
 }
 
@@ -392,11 +476,6 @@ fn load_from_mount(dir: &Path, model_name: &str) -> Result<Option<LoadedTokenize
     if !tok_path.exists() {
         return Ok(None);
     }
-    tracing::info!(
-        model = model_name,
-        path = %tok_path.display(),
-        "loading the tokenizer from the mount"
-    );
     let tokenizer = Tokenizer::from_file(&tok_path).map_err(|source| Error::TokenizerFile {
         path: tok_path.clone(),
         source,

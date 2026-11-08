@@ -33,6 +33,10 @@ pub enum Error {
         model: String,
         source: tokenizers::Error,
     },
+    /// Another request is loading the model's tokenizer.
+    TokenizerLoading { model: String },
+    /// The model's tokenizer failed to load recently and is not retried yet.
+    TokenizerBackoff { model: String },
     /// A blocking tokenizer load was cancelled or panicked.
     Join(tokio::task::JoinError),
     /// `encode` rejected the input.
@@ -95,6 +99,10 @@ impl std::fmt::Display for Error {
                 write!(f, "Tokenizer::from_file({})", path.display())
             }
             Error::TokenizerHub { model, .. } => write!(f, "Tokenizer::from_pretrained({model})"),
+            Error::TokenizerLoading { model } => write!(f, "the tokenizer for {model} is loading"),
+            Error::TokenizerBackoff { model } => {
+                write!(f, "the tokenizer for {model} failed to load recently")
+            }
             Error::Join(_) => f.write_str("spawn_blocking join"),
             Error::Encode { model, .. } => write!(f, "tokenizer encode failed for {model}"),
             Error::NoChatTemplate { model } => write!(
@@ -120,6 +128,8 @@ impl std::error::Error for Error {
             Error::RenderStatus { .. }
             | Error::RenderShape(_)
             | Error::NoChatTemplate { .. }
+            | Error::TokenizerLoading { .. }
+            | Error::TokenizerBackoff { .. }
             | Error::MissingFile(_)
             | Error::HubStatus { .. } => None,
             Error::RenderDecode { source, .. } => Some(source),

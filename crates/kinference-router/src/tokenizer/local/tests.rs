@@ -693,3 +693,87 @@ async fn warmup_loads_the_model() {
     local.warmup("m").await.expect("warm-up");
     assert_eq!(local.decode("m", &[0, 1]).as_deref(), Some("hello world"));
 }
+
+/// Replace `m`'s mounted `tokenizer.json` with `contents`.
+fn remount(dir: &Path, contents: &str) {
+    std::fs::write(dir.join("m").join("tokenizer.json"), contents).expect("tokenizer.json");
+}
+
+/// A failed load is not retried before the backoff ends, even once the
+/// mount is fixed; its requests fall back to `/render` meanwhile.
+#[tokio::test]
+async fn a_failed_load_backs_off() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (local, registry) = local_over(dir.path(), Some(TEMPLATE));
+    remount(dir.path(), "not json");
+    let fake = FakeRender::start(Render::Tokens(vec![7])).await;
+    let workers = [(
+        1,
+        worker("m", "10.0.0.1:8000", true, Some(fake.base().to_string())),
+    )];
+    let raw = || TokenizeInput::Raw("hello world".into());
+
+    let err = local
+        .encode("m", &raw())
+        .await
+        .expect_err("a corrupt mount");
+    assert!(matches!(err, Error::TokenizerFile { .. }), "{err}");
+    remount(dir.path(), WORDLEVEL_TOKENIZER_JSON);
+    for _ in 0..3 {
+        let out = local.encode_or_render(&request(&workers, "m", raw())).await;
+        assert_eq!(out, TokenizeOutcome::Ok(vec![7]));
+    }
+    let err = local.encode("m", &raw()).await.expect_err("backing off");
+    assert!(matches!(err, Error::TokenizerBackoff { .. }), "{err}");
+    assert!(exposition(&registry).contains(r#"kinference_tokenize_total{path="http_fallback"} 3"#));
+}
+
+/// Once the backoff ends, the next request loads the model again.
+#[tokio::test]
+async fn a_failed_load_is_retried_after_the_backoff() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut local, _) = local_over(dir.path(), Some(TEMPLATE));
+    local.retry_after = Duration::ZERO;
+    remount(dir.path(), "not json");
+    let raw = || TokenizeInput::Raw("hello world".into());
+
+    local
+        .encode("m", &raw())
+        .await
+        .expect_err("a corrupt mount");
+    remount(dir.path(), WORDLEVEL_TOKENIZER_JSON);
+    assert_eq!(
+        local.encode("m", &raw()).await.expect("a retry"),
+        [99, 0, 1]
+    );
+}
+
+/// While one request loads a model, another falls back at once, and a
+/// warm-up counts the running load as warm.
+#[tokio::test]
+async fn a_running_load_is_not_started_twice() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (local, _) = local_over(dir.path(), Some(TEMPLATE));
+    local.slots.insert("m".into(), Slot::Loading);
+
+    let err = local
+        .encode("m", &TokenizeInput::Raw("hello".into()))
+        .await
+        .expect_err("loading");
+    assert!(matches!(err, Error::TokenizerLoading { .. }), "{err}");
+    local.warmup("m").await.expect("a running load is warm");
+}
+
+/// A load whose request is dropped mid-load clears the slot, so the next
+/// request loads instead of waiting forever.
+#[test]
+fn an_abandoned_load_clears_the_slot() {
+    let slots = DashMap::new();
+    slots.insert("m".to_string(), Slot::Loading);
+    drop(LoadClaim {
+        slots: &slots,
+        model: "m",
+        settled: false,
+    });
+    assert!(slots.get("m").is_none());
+}
