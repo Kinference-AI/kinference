@@ -5,6 +5,7 @@ use std::error::Error as StdError;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
+use tokio::sync::Semaphore;
 
 use super::http::HttpRender;
 use super::local::LocalTokenizer;
@@ -12,11 +13,16 @@ use super::{TokenizeInput, TokenizeOutcome, TokenizeRequest, Tokenizer};
 use crate::metrics::RouterMetrics;
 use crate::warn_once::WarnOnce;
 
+/// Most comparisons that run at once. A request that finds them all busy
+/// skips its comparison, so compare mode's CPU cost stays bounded.
+const MAX_COMPARISONS: usize = 4;
+
 #[derive(Clone)]
 pub(crate) struct Compare {
     http: Arc<HttpRender>,
     local: Arc<LocalTokenizer>,
     prom: Arc<RouterMetrics>,
+    comparisons: Arc<Semaphore>,
     /// Models that have diverged, so each logs its first divergence only.
     diverged: Arc<WarnOnce<String>>,
     /// Models that have failed locally, so each logs its first failure only.
@@ -33,6 +39,7 @@ impl Compare {
             http,
             local,
             prom,
+            comparisons: Arc::new(Semaphore::new(MAX_COMPARISONS)),
             diverged: Arc::default(),
             failed: Arc::default(),
         }
@@ -43,12 +50,17 @@ impl Compare {
     pub(crate) async fn render_then_compare(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
         let outcome = self.http.render(req).await;
         if let TokenizeOutcome::Ok(http_tokens) = &outcome {
+            let Ok(permit) = self.comparisons.clone().try_acquire_owned() else {
+                self.prom.record_tokenize_compare("skipped");
+                return outcome;
+            };
             let this = self.clone();
             let model = req.model.to_string();
             let input = req.input.clone();
             let http_tokens = http_tokens.clone();
             tokio::spawn(async move {
                 this.compare(&model, input, &http_tokens).await;
+                drop(permit);
             });
         }
         outcome

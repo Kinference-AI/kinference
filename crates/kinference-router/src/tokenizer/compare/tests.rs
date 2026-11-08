@@ -108,3 +108,27 @@ async fn different_tokens_count_a_divergence_without_logging_the_prompt() {
     assert!(logs.contains("local tokens differ"), "{logs}");
     assert!(!logs.contains("hello") && !logs.contains("world"), "{logs}");
 }
+
+/// When every comparison slot is busy, the request skips its comparison
+/// and still gets the `/render` tokens.
+#[tokio::test]
+async fn a_saturated_compare_skips_the_comparison() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (compare, registry) = compare_over(dir.path(), Some(WORDLEVEL_CHAT_TEMPLATE));
+    let fake = FakeRender::start(Render::Tokens(vec![5])).await;
+    let workers = [(
+        1,
+        worker("m", "10.0.0.1:8000", true, Some(fake.base().to_string())),
+    )];
+    let _busy = compare
+        .comparisons
+        .clone()
+        .try_acquire_many_owned(MAX_COMPARISONS as u32)
+        .expect("every permit");
+
+    let out = compare.tokenize(request(&workers, "m", raw())).await;
+    assert_eq!(out, TokenizeOutcome::Ok(vec![5]));
+    assert!(
+        exposition(&registry).contains(r#"kinference_tokenize_compare_total{result="skipped"} 1"#)
+    );
+}
