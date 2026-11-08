@@ -19,7 +19,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::Instrument;
 
-use crate::body_store::BodyLease;
+use crate::body_store::{BodyLease, MAX_CHUNK_BYTES};
 use crate::metrics::PickOutcome;
 use crate::observations::{FinalTokenReport, Qos};
 use crate::service::{KinferenceService, PickAndRecordOutcome};
@@ -46,13 +46,12 @@ const PULL_CHUNK_BYTES: usize = 64 * 1024;
 /// backpressure.
 const PULL_CHANNEL_DEPTH: usize = 4;
 
-/// The tonic service over `service`. The decoding limit is the per-request
-/// body budget plus 1 MiB of framing, above tonic's 4 MiB default, so a body
-/// sent as one chunk hits our own `RESOURCE_EXHAUSTED` rather than an opaque
-/// transport error. Callers should still chunk.
+/// The tonic service over `service`. The decoding limit is the proto's chunk
+/// limit plus room for a `BodyChunk`'s tag and length varint. tonic buffers
+/// a whole message before the body budget sees it, so the limit bounds
+/// those unbudgeted bytes. No other request message comes near the limit.
 pub fn server(service: Arc<KinferenceService>) -> PickerServer<KinferenceService> {
-    let limit = service.bodies.store.max_request_bytes() + 1024 * 1024;
-    PickerServer::from_arc(service).max_decoding_message_size(limit as usize)
+    PickerServer::from_arc(service).max_decoding_message_size(MAX_CHUNK_BYTES + 16)
 }
 
 #[tonic::async_trait]

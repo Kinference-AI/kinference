@@ -124,7 +124,12 @@ const TOKENIZE_COMPARE_RESULTS: [&str; 3] = ["match", "divergence", "error"];
 
 /// `kinference_body_rejected_total{reason}`.
 /// Source: [`crate::body_store::RejectReason::as_label`].
-const BODY_REJECT_REASONS: [&str; 3] = ["declared_too_large", "request_too_large", "server_full"];
+const BODY_REJECT_REASONS: [&str; 4] = [
+    "declared_too_large",
+    "request_too_large",
+    "chunk_too_large",
+    "server_full",
+];
 
 /// `kinference_body_aborted_total{reason}`. Source: `crate::grpc::abort_reason_label`.
 const BODY_ABORT_REASONS: [&str; 5] = [
