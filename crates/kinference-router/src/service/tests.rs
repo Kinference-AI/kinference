@@ -539,12 +539,10 @@ async fn an_aliased_model_is_one_candidate_per_endpoint() {
         panic!("expected a local pick");
     };
     assert_eq!(endpoint, "10.0.0.1:8000");
+    // Two endpoints, each recorded once.
     let metrics = t.metrics();
-    for worker in ["10.0.0.1:8000", "10.0.0.2:8000"] {
-        let line =
-            format!(r#"kinference_predicted_ttft_ms_count{{model="qwen",worker="{worker}"}} 1"#);
-        assert!(metrics.contains(&line), "missing `{line}`:\n{metrics}");
-    }
+    let line = r#"kinference_predicted_ttft_ms_count{model="qwen"} 2"#;
+    assert!(metrics.contains(line), "missing `{line}`:\n{metrics}");
 }
 
 /// A `drop` on one alias removes the model under every name.
