@@ -30,7 +30,8 @@ const TOTAL_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Tokenization over `/render`: a dedicated URL tried once, else the pool's
 /// workers in turn, freshest scrape first, at most three, within one
-/// deadline.
+/// deadline. A status that every worker would return for the body ends the
+/// rotation early.
 pub(crate) struct HttpRender {
     client: reqwest::Client,
     /// Scrape ages order the workers: a fresh scrape is a free liveness
@@ -132,6 +133,7 @@ impl HttpRender {
         let attempts = candidates.len();
 
         // The client timeout caps each attempt; the deadline caps the loop.
+        // An error carries the number of attempts that ran.
         let do_attempts = async {
             let mut last_err: Option<String> = None;
             for (i, (_num, worker_id_str, url)) in candidates.iter().enumerate() {
@@ -154,6 +156,16 @@ impl HttpRender {
                         );
                         return Ok(tokens);
                     }
+                    Err(e) if rejects_the_body(&e) => {
+                        tracing::debug!(
+                            worker_id = %worker_id_str,
+                            url = %url,
+                            attempt = i + 1,
+                            error = &e as &dyn StdError,
+                            "render rejected the body"
+                        );
+                        return Err((e.chain(), i + 1));
+                    }
                     Err(e) => {
                         let err_string = e.chain();
                         tracing::debug!(
@@ -169,12 +181,15 @@ impl HttpRender {
                     }
                 }
             }
-            Err(last_err.unwrap_or_else(|| "no attempts ran".to_string()))
+            Err((
+                last_err.unwrap_or_else(|| "no attempts ran".to_string()),
+                attempts,
+            ))
         };
 
         match tokio::time::timeout(TOTAL_DEADLINE, do_attempts).await {
             Ok(Ok(tokens)) => TokenizeOutcome::Ok(tokens),
-            Ok(Err(reason)) => TokenizeOutcome::Unavailable { reason, attempts },
+            Ok(Err((reason, attempts))) => TokenizeOutcome::Unavailable { reason, attempts },
             Err(_) => TokenizeOutcome::Unavailable {
                 reason: format!("total deadline of {}s elapsed", TOTAL_DEADLINE.as_secs()),
                 attempts,
@@ -271,6 +286,25 @@ async fn token_ids(resp: reqwest::Response, url: &str) -> Result<Vec<u32>, Error
         source,
     })?;
     parse_render_response(&bytes)
+}
+
+/// True when `err` is a status that every worker would return for this
+/// body. A 404 may mean that only this worker has `/render` disabled. A 408
+/// or a 429 reflects the worker's state, so the rotation moves on after it.
+fn rejects_the_body(err: &Error) -> bool {
+    use reqwest::StatusCode;
+    match err {
+        Error::RenderStatus { status } => {
+            status.is_client_error()
+                && !matches!(
+                    *status,
+                    StatusCode::NOT_FOUND
+                        | StatusCode::REQUEST_TIMEOUT
+                        | StatusCode::TOO_MANY_REQUESTS
+                )
+        }
+        _ => false,
+    }
 }
 
 /// POST `raw_body` verbatim to `{base}/v1/chat/completions/render`.
