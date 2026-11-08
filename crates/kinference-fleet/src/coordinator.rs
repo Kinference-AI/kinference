@@ -189,28 +189,29 @@ impl Coordinator {
             return;
         }
 
-        // Provisionally route the model_name hint, before the first
-        // /v1/models scrape.
-        self.worker_pool.insert(w.worker_id_num, pool.clone());
-        if !w.model_name.is_empty() {
-            self.models
-                .associate(pool.id, &pool.name, std::slice::from_ref(&w.model_name));
-        }
-
         // Seeded from config.model_name; `by_model` is updated by the
         // metrics poller and warmup.
         let entry = WorkerEntry::from_config(&w, block_size);
         // The key the pick path uses for inflight state, which the ZMQ
         // listener also keys `on_stored` by.
         let endpoint_key = entry.score_addr.clone();
+        // Before the claim: a duplicate Added must leave the existing
+        // owner entry in place.
         if !registry.register(w.worker_id_num, entry) {
             tracing::warn!(
                 workerset = pool.name,
                 worker_id = w.worker_id_str,
                 "worker id already registered; skipping"
             );
-            self.worker_pool.remove(&w.worker_id_num);
             return;
+        }
+
+        // Provisionally route the model_name hint, before the first
+        // /v1/models scrape.
+        self.worker_pool.insert(w.worker_id_num, pool.clone());
+        if !w.model_name.is_empty() {
+            self.models
+                .associate(pool.id, &pool.name, std::slice::from_ref(&w.model_name));
         }
 
         let worker_token = self.cancel.child_token();

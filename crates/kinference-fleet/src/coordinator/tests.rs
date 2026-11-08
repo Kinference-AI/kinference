@@ -112,6 +112,22 @@ async fn a_second_pool_cannot_claim_an_owned_worker() {
     assert_eq!(h.models.pools_for("llama"), vec![a.id]);
 }
 
+/// A duplicate Added from the owning pool keeps the worker's owner entry
+/// and its tasks.
+#[tokio::test]
+async fn a_duplicate_add_keeps_the_owner() {
+    let h = harness();
+    let pool = test_pool("a");
+    h.coordinator.add_worker(&pool, worker(1, "llama"));
+    let token = token_for(&h.coordinator, &pool, 1).expect("token stored");
+
+    h.coordinator.add_worker(&pool, worker(1, "llama"));
+
+    assert_eq!(owner_of(&h.coordinator, 1), Some(pool.id));
+    assert!(!token.is_cancelled());
+    assert!(pool.registry.lookup(1).is_some());
+}
+
 /// A declared model list seeds the worker and marks it ready without a
 /// `/v1/models` scrape. A list that conflicts with the registry's pinned
 /// set leaves the worker registered but not routable for those models.
