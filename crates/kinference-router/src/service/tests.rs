@@ -785,6 +785,30 @@ async fn token_metrics_name_the_model_each_body_was_sent_with() {
     assert!(!out.contains("what-the-vendor-said"), "{out}");
 }
 
+/// A report for a pick that kinference doesn't hold is recorded under the
+/// model `unknown`, never under the model that the report names.
+#[tokio::test]
+async fn an_orphaned_report_is_labelled_unknown() {
+    use crate::proto::picker_server::Picker;
+
+    let (t, _) = local_and_cloud_picks().await;
+    t.svc
+        .report_final_token(tonic::Request::new(crate::proto::ReportFinalTokenRequest {
+            response_id: 999,
+            model: "anything-the-caller-sent".into(),
+            prompt_tokens: 3,
+            completion_tokens: 1,
+            ..Default::default()
+        }))
+        .await
+        .expect("report accepted");
+    let out = t.metrics();
+    let line =
+        r#"kinference_prompt_tokens_total{model="unknown",qos="unknown",tenant="default"} 3"#;
+    assert!(out.contains(line), "missing {line}:\n{out}");
+    assert!(!out.contains("anything-the-caller-sent"), "{out}");
+}
+
 // --- the pick path, end to end ----------------------------------------------
 
 /// An OpenAI chat request for `qwen`.

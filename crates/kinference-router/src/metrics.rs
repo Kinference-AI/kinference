@@ -392,9 +392,9 @@ impl RouterMetrics {
             registry,
             "kinference_orphaned_reports_total",
             "Final-token reports whose response_id kinference never issued, or whose \
-             labels aged out of the 600s TTL. Their model comes from the request \
-             field rather than the pick, their tenant falls back to the default \
-             bucket, and their qos is reported as `unknown` — so a non-zero value \
+             labels aged out of the observation TTL. Their model and qos are \
+             reported as `unknown` and their tenant falls back to the default \
+             bucket, so a non-zero value \
              means that much of every per-request family is misattributed. \
              Unlabelled: it answers whether attribution is intact, not whose",
         );

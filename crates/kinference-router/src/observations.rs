@@ -441,16 +441,17 @@ impl Observations {
     /// qos, tenant) usage, duration and ITL families.
     ///
     /// Returns whether `response_id` was known. When it was not (swept or
-    /// never picked), the families are still recorded, under the report's
-    /// own model and `Qos::Unknown`, and the orphan is counted.
+    /// never picked), the families are still recorded, under the model
+    /// `unknown` and `Qos::Unknown`, and the orphan is counted.
     pub(crate) fn record_final_token(&self, response_id: u64, report: &FinalTokenReport) -> bool {
         let meta = self.labels.take(response_id);
         // An unknown or expired `response_id` leaves nothing to attribute this
         // to. The empty tenant maps to the default bucket.
         let (model, qos, tenant) = match &meta {
             Some(m) => (m.model.clone(), m.qos, m.tenant.clone()),
-            // `Unknown`, rather than a guess.
-            None => (report.model.clone(), Qos::Unknown, String::new()),
+            // `unknown`, rather than a guess. The report's model is whatever
+            // the caller sent, so as a label it could grow without bound.
+            None => ("unknown".to_string(), Qos::Unknown, String::new()),
         };
         if meta.is_none() {
             self.prom.record_orphaned_report();
@@ -459,6 +460,7 @@ impl Observations {
         tracing::debug!(
             response_id,
             model = %model,
+            reported_model = %report.model,
             qos = qos_label,
             prompt_tokens = report.prompt_tokens,
             completion_tokens = report.completion_tokens,
