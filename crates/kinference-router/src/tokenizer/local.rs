@@ -274,49 +274,21 @@ impl LocalTokenizer {
     /// `encode` rejects the input.
     pub async fn encode(&self, model_name: &str, input: &TokenizeInput) -> Result<Vec<u32>, Error> {
         let loaded = self.get_or_load(model_name).await?;
-        let encode = |source| Error::Encode {
-            model: model_name.to_string(),
-            source,
-        };
-        match input {
-            TokenizeInput::Raw(prompt) => {
-                let encoding = loaded
-                    .tokenizer
-                    .encode(prompt.as_str(), /* add_special_tokens */ true)
-                    .map_err(encode)?;
-                Ok(encoding.get_ids().to_vec())
-            }
-            TokenizeInput::Chat {
-                messages,
-                kwargs,
-                tools,
-                tool_choice,
-                add_generation_prompt,
-            } => {
-                let template =
-                    loaded
-                        .chat_template
-                        .as_deref()
-                        .ok_or_else(|| Error::NoChatTemplate {
-                            model: model_name.to_string(),
-                        })?;
-                let rendered = render_chat_template(
-                    template,
-                    messages,
-                    kwargs,
-                    tools,
-                    tool_choice.as_ref(),
-                    *add_generation_prompt,
-                    &loaded.special_tokens,
-                )?;
-                let encoding = loaded
-                    .tokenizer
-                    // The template emits the special tokens itself.
-                    .encode(rendered.as_str(), /* add_special_tokens */ false)
-                    .map_err(encode)?;
-                Ok(encoding.get_ids().to_vec())
-            }
-        }
+        encode_with(&loaded, model_name, input)
+    }
+
+    /// [`Self::encode`], with the template render and the encode on a
+    /// blocking thread.
+    pub(crate) async fn encode_on_blocking_thread(
+        &self,
+        model_name: &str,
+        input: TokenizeInput,
+    ) -> Result<Vec<u32>, Error> {
+        let loaded = self.get_or_load(model_name).await?;
+        let model = model_name.to_string();
+        tokio::task::spawn_blocking(move || encode_with(&loaded, &model, &input))
+            .await
+            .map_err(Error::Join)?
     }
 
     /// Return the cached tokenizer, or load it (possibly from the network).
@@ -414,6 +386,57 @@ impl LocalTokenizer {
             chat_template: meta.chat_template,
             special_tokens: meta.special_tokens,
         }))
+    }
+}
+
+/// Tokenize `input` with a loaded tokenizer. CPU-bound for a long prompt.
+fn encode_with(
+    loaded: &LoadedTokenizer,
+    model_name: &str,
+    input: &TokenizeInput,
+) -> Result<Vec<u32>, Error> {
+    let encode = |source| Error::Encode {
+        model: model_name.to_string(),
+        source,
+    };
+    match input {
+        TokenizeInput::Raw(prompt) => {
+            let encoding = loaded
+                .tokenizer
+                .encode(prompt.as_str(), /* add_special_tokens */ true)
+                .map_err(encode)?;
+            Ok(encoding.get_ids().to_vec())
+        }
+        TokenizeInput::Chat {
+            messages,
+            kwargs,
+            tools,
+            tool_choice,
+            add_generation_prompt,
+        } => {
+            let template =
+                loaded
+                    .chat_template
+                    .as_deref()
+                    .ok_or_else(|| Error::NoChatTemplate {
+                        model: model_name.to_string(),
+                    })?;
+            let rendered = render_chat_template(
+                template,
+                messages,
+                kwargs,
+                tools,
+                tool_choice.as_ref(),
+                *add_generation_prompt,
+                &loaded.special_tokens,
+            )?;
+            let encoding = loaded
+                .tokenizer
+                // The template emits the special tokens itself.
+                .encode(rendered.as_str(), /* add_special_tokens */ false)
+                .map_err(encode)?;
+            Ok(encoding.get_ids().to_vec())
+        }
     }
 }
 

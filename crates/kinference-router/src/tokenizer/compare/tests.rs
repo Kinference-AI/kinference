@@ -35,7 +35,7 @@ async fn matching_tokens_count_a_match() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (compare, registry) = compare_over(dir.path(), Some(WORDLEVEL_CHAT_TEMPLATE));
 
-    compare.compare("m", &raw(), &[99, 0, 1]).await;
+    compare.compare("m", raw(), &[99, 0, 1]).await;
     assert!(
         exposition(&registry).contains(r#"kinference_tokenize_compare_total{result="match"} 1"#)
     );
@@ -48,7 +48,7 @@ async fn a_local_failure_counts_an_error() {
     let (compare, registry) = compare_over(dir.path(), None);
 
     compare
-        .compare("m", &chat_input("hello world"), &[99, 0, 1])
+        .compare("m", chat_input("hello world"), &[99, 0, 1])
         .await;
     assert!(
         exposition(&registry).contains(r#"kinference_tokenize_compare_total{result="error"} 1"#)
@@ -99,7 +99,7 @@ async fn different_tokens_count_a_divergence_without_logging_the_prompt() {
         .finish();
 
     let _guard = tracing::subscriber::set_default(subscriber);
-    compare.compare("m", &raw(), &[99, 1, 0]).await;
+    compare.compare("m", raw(), &[99, 1, 0]).await;
     assert!(
         exposition(&registry)
             .contains(r#"kinference_tokenize_compare_total{result="divergence"} 1"#)

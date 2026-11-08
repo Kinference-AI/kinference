@@ -48,7 +48,7 @@ impl Compare {
             let input = req.input.clone();
             let http_tokens = http_tokens.clone();
             tokio::spawn(async move {
-                this.compare(&model, &input, &http_tokens).await;
+                this.compare(&model, input, &http_tokens).await;
             });
         }
         outcome
@@ -56,8 +56,8 @@ impl Compare {
 
     /// Tokenize in process and count and log divergence from the `/render`
     /// tokens. Errors are counted, never returned.
-    pub(crate) async fn compare(&self, model: &str, input: &TokenizeInput, http_tokens: &[u32]) {
-        match self.local.encode(model, input).await {
+    pub(crate) async fn compare(&self, model: &str, input: TokenizeInput, http_tokens: &[u32]) {
+        match self.local.encode_on_blocking_thread(model, input).await {
             Ok(local_tokens) if local_tokens.as_slice() == http_tokens => {
                 self.prom.record_tokenize_compare("match");
             }
