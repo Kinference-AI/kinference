@@ -202,6 +202,11 @@ pub const SCHEMA_ERROR: &str = "SchemaError";
 pub const UNKNOWN_FIELD: &str = "UnknownField";
 /// A policy's `namespace/name` appears twice among the inputs.
 pub const DUPLICATE_POLICY: &str = "DuplicatePolicy";
+/// One of our kinds under an API group that looks like a typo of ours. The
+/// API server would store it as some other resource, or reject it.
+pub const UNKNOWN_API_GROUP: &str = "UnknownApiGroup";
+
+const GROUP: &str = "kinference.buoyant.io";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -210,7 +215,7 @@ pub struct DocumentError {
     /// 1-based position of the document within its source.
     pub document: usize,
     pub kind: String,
-    /// Always [`SCHEMA_ERROR`].
+    /// [`SCHEMA_ERROR`] or [`UNKNOWN_API_GROUP`].
     pub code: &'static str,
     pub message: String,
 }
@@ -374,6 +379,12 @@ fn in_group(v: &Value, group: &str) -> bool {
         .is_some_and(|a| a.split('/').next() == Some(group))
 }
 
+/// The API group of `v`, when it is close to ours but not ours.
+fn group_typo(v: &Value) -> Option<&str> {
+    let group = v.get("apiVersion")?.as_str()?.split('/').next()?;
+    did_you_mean(group, [GROUP]).map(|_| group)
+}
+
 /// Parse a multi-document YAML stream into JSON values.
 ///
 /// The parser refuses more than 32 consecutive comment lines before a list
@@ -493,7 +504,7 @@ pub fn check(inputs: &[Input], opts: &Options) -> Result<Report, InputError> {
                 m.remove("status");
             }
             let kind = kind_of(&obj);
-            let ours = in_group(&obj, "kinference.buoyant.io");
+            let ours = in_group(&obj, GROUP);
             let typed_err = |e: serde_json::Error| DocumentError {
                 source: input.source.clone(),
                 document: n,
@@ -534,6 +545,22 @@ pub fn check(inputs: &[Input], opts: &Options) -> Result<Report, InputError> {
                         Err(e) => other_errors.push(typed_err(e)),
                     }
                 }
+                "InferencePolicy" | "InferencePool" | "InferenceWorkerSet"
+                | "InferenceProvider"
+                    if group_typo(&obj).is_some() =>
+                {
+                    let api_version = obj["apiVersion"].as_str().unwrap_or_default();
+                    other_errors.push(DocumentError {
+                        source: input.source.clone(),
+                        document: n,
+                        kind,
+                        code: UNKNOWN_API_GROUP,
+                        message: format!(
+                            "apiVersion `{api_version}` is not ours, so the document was not \
+                             checked. Did you mean `{GROUP}/v1alpha1`?"
+                        ),
+                    });
+                }
                 _ => skipped_documents.push(SkippedDocument {
                     source: input.source.clone(),
                     document: n,
@@ -542,7 +569,8 @@ pub fn check(inputs: &[Input], opts: &Options) -> Result<Report, InputError> {
             }
         }
     }
-    if policies.is_empty() {
+    // A policy under a misspelled group is a finding, not an empty input.
+    if policies.is_empty() && !other_errors.iter().any(|e| e.kind == "InferencePolicy") {
         return Err(InputError::NoPolicies);
     }
 
