@@ -41,19 +41,6 @@ async fn matching_tokens_count_a_match() {
     );
 }
 
-/// Different tokens count as a divergence, with the decoded window logged.
-#[tokio::test]
-async fn different_tokens_count_a_divergence() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (compare, registry) = compare_over(dir.path(), Some(WORDLEVEL_CHAT_TEMPLATE));
-
-    compare.compare("m", &raw(), &[99, 1, 0]).await;
-    assert!(
-        exposition(&registry)
-            .contains(r#"kinference_tokenize_compare_total{result="divergence"} 1"#)
-    );
-}
-
 /// A local failure counts as an error, not a divergence.
 #[tokio::test]
 async fn a_local_failure_counts_an_error() {
@@ -82,4 +69,42 @@ async fn render_is_returned_unchanged() {
 
     let out = compare.tokenize(request(&workers, "m", raw())).await;
     assert_eq!(out, TokenizeOutcome::Ok(vec![5]));
+}
+
+/// Collects what a subscriber writes.
+#[derive(Clone, Default)]
+struct LogBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log buffer").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Different tokens count as a divergence, and the log names token ids,
+/// never the prompt's text.
+#[tokio::test]
+async fn different_tokens_count_a_divergence_without_logging_the_prompt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (compare, registry) = compare_over(dir.path(), Some(WORDLEVEL_CHAT_TEMPLATE));
+    let buf = LogBuf::default();
+    let writer = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+
+    let _guard = tracing::subscriber::set_default(subscriber);
+    compare.compare("m", &raw(), &[99, 1, 0]).await;
+    assert!(
+        exposition(&registry)
+            .contains(r#"kinference_tokenize_compare_total{result="divergence"} 1"#)
+    );
+    let logs = String::from_utf8(buf.0.lock().expect("log buffer").clone()).expect("utf-8");
+    assert!(logs.contains("local tokens differ"), "{logs}");
+    assert!(!logs.contains("hello") && !logs.contains("world"), "{logs}");
 }

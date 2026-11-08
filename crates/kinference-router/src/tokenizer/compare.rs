@@ -72,6 +72,7 @@ impl Compare {
                     .position(|(a, b)| a != b)
                     .unwrap_or_else(|| http_tokens.len().min(local_tokens.len()));
                 // 8 tokens before to 16 after the divergence, on both sides.
+                // Ids only: decoded text would put the prompt in the log.
                 let win_start = first_diff.saturating_sub(8);
                 let http_win: Vec<u32> = http_tokens
                     .iter()
@@ -85,14 +86,6 @@ impl Compare {
                     .take(24)
                     .copied()
                     .collect();
-                let http_text = self
-                    .local
-                    .decode(model, &http_win)
-                    .unwrap_or_else(|| "<decode-unavailable>".to_string());
-                let local_text = self
-                    .local
-                    .decode(model, &local_win)
-                    .unwrap_or_else(|| "<decode-unavailable>".to_string());
                 tracing::warn!(
                     model,
                     http_count = http_tokens.len(),
@@ -101,8 +94,6 @@ impl Compare {
                     window_start = win_start,
                     http_window = ?http_win,
                     local_window = ?local_win,
-                    http_text = %http_text,
-                    local_text = %local_text,
                     "local tokens differ from /render"
                 );
             }

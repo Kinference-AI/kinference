@@ -683,15 +683,16 @@ async fn a_double_failure_is_unavailable() {
     assert!(exposition(&registry).contains(r#"kinference_tokenize_total{path="http_fallback"} 0"#));
 }
 
-/// Warm-up loads the model so a later decode needs no load.
+/// Warm-up loads the model so that a later request needs no load.
 #[tokio::test]
 async fn warmup_loads_the_model() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (local, _) = local_over(dir.path(), Some(TEMPLATE));
+    let loaded = || matches!(local.slots.get("m").as_deref(), Some(Slot::Loaded(_)));
 
-    assert!(local.decode("m", &[0, 1]).is_none(), "not loaded yet");
+    assert!(!loaded(), "not loaded yet");
     local.warmup("m").await.expect("warm-up");
-    assert_eq!(local.decode("m", &[0, 1]).as_deref(), Some("hello world"));
+    assert!(loaded());
 }
 
 /// Replace `m`'s mounted `tokenizer.json` with `contents`.

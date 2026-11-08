@@ -267,17 +267,6 @@ impl LocalTokenizer {
         }
     }
 
-    /// Decode tokens back to text, for compare-mode divergence logs.
-    ///
-    /// `None` if the model isn't loaded; never triggers a Hub fetch. Keeps
-    /// special tokens so control tokens show up in the log.
-    pub fn decode(&self, model_name: &str, tokens: &[u32]) -> Option<String> {
-        let Slot::Loaded(loaded) = &*self.slots.get(model_name)? else {
-            return None;
-        };
-        loaded.tokenizer.decode(tokens, false).ok()
-    }
-
     /// Tokenize `input` against `model_name`'s tokenizer, in process only.
     ///
     /// Errors when the tokenizer can't be loaded, chat input is given for a
