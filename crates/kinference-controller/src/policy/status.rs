@@ -1200,6 +1200,10 @@ impl<A: ApiServer> StatusWriter<A> {
                 return;
             }
         }
+        // A reconcile spans many writes, and leadership can end midway.
+        if !self.leading() {
+            return;
+        }
         match self.api.patch_status::<K>(ns, name, &value).await {
             Ok(_) => {
                 tracing::debug!(kind, ns, name, "status patched");

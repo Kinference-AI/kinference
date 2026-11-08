@@ -1474,3 +1474,16 @@ async fn a_closed_leader_channel_stops_writes() {
     assert!(api.writes().is_empty(), "wrote {:?}", api.writes());
     assert!(render(&registry).contains("kinference_leader 0"));
 }
+
+/// A reconcile that starts after demotion writes nothing.
+#[tokio::test]
+async fn a_demoted_reconcile_writes_nothing() {
+    let (api, index) = recorded_cluster();
+    let ((w, tx), _) = writer_over(api.clone(), true);
+    w.store.publish(index);
+    tx.send(false).expect("the writer holds the receiver");
+
+    w.reconcile_once().await;
+
+    assert!(api.writes().is_empty(), "wrote {:?}", api.writes());
+}

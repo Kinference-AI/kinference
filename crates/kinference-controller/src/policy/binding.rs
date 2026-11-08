@@ -425,6 +425,10 @@ impl<A: ApiServer> BindingWriter<A> {
                     continue;
                 }
             }
+            // A reconcile spans many writes, and leadership can end midway.
+            if !self.leading() {
+                return Ok(());
+            }
             // Server-side apply covers both create and update. `apply` forces,
             // taking back fields another manager grabbed; otherwise the apply
             // would conflict on every tick and never converge.
@@ -453,6 +457,9 @@ impl<A: ApiServer> BindingWriter<A> {
             }
             if binding.meta().deletion_timestamp.is_some() {
                 continue;
+            }
+            if !self.leading() {
+                return Ok(());
             }
             match self.api.delete::<BackendBinding>(&ns, &name).await {
                 Ok(_) => tracing::info!(

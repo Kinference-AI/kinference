@@ -743,3 +743,27 @@ async fn a_closed_leader_channel_stops_writes() {
 
     assert!(api.writes().is_empty(), "wrote {:?}", api.writes());
 }
+
+/// A reconcile that starts after demotion neither applies nor prunes.
+#[tokio::test]
+async fn a_demoted_reconcile_writes_nothing() {
+    let want = desired(
+        listed_snapshot().lookup("infra", "chat").unwrap(),
+        ext().as_ref(),
+    );
+    let mut orphan = want.clone();
+    orphan.metadata.name = Some("gone".into());
+    // The first cluster needs an apply, the second only a delete.
+    for existing in [vec![orphan.clone()], vec![want, orphan]] {
+        let api = Recorded::default().with(existing);
+        let store = PolicyStore::new();
+        store.publish(listed_snapshot());
+        let (tx, rx) = watch::channel(true);
+        let w = BindingWriter::new(api.clone(), Some("infra".into()), store, ext(), rx);
+        tx.send(false).expect("the writer holds the receiver");
+
+        w.reconcile_once().await.unwrap();
+
+        assert!(api.writes().is_empty(), "wrote {:?}", api.writes());
+    }
+}

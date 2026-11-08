@@ -311,6 +311,8 @@ pub async fn run<A: ApiServer>(
         }
     }
 
+    // Demote before vacating, so the writers stop before the peer claims.
+    let _ = tx.send(false);
     // Vacate a claim that we wrote, so the peer claims at once instead of
     // waiting out our expiry. Optimistic concurrency keeps this from
     // clearing a rival's newer claim.
@@ -322,7 +324,6 @@ pub async fn run<A: ApiServer>(
             "failed to vacate lease on shutdown"
         );
     }
-    let _ = tx.send(false);
 }
 
 /// Fail `call` after `budget`. kube's own read timeout is minutes long.
