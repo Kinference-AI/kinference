@@ -153,16 +153,17 @@ fn a_claim_left_under_our_identity_is_re_taken() {
     let t0 = Instant::now();
     let s = seen(ME, t0, false);
     assert_eq!(next_action(t0, &s, ME, GRACE), Action::Claim);
-    assert!(!s.leads(t0));
+    assert!(!s.leads(t0, Duration::ZERO));
 }
 
 #[test]
-fn leading_respects_expiry() {
+fn leading_stops_a_margin_before_expiry() {
     let t0 = Instant::now();
+    let margin = secs(5);
     let s = seen(ME, t0, true);
-    assert!(s.leads(t0 + secs(10)));
-    assert!(!s.leads(t0 + secs(15)));
-    assert!(!seen(OTHER, t0, false).leads(t0));
+    assert!(s.leads(t0 + secs(9), margin));
+    assert!(!s.leads(t0 + secs(10), margin));
+    assert!(!seen(OTHER, t0, false).leads(t0, margin));
 }
 
 /// The loop over a recorded API server: a free Lease is created, claimed,
@@ -288,4 +289,28 @@ async fn a_dead_rival_with_a_fast_clock_loses_the_lease_after_one_duration() {
         .expect("the elector holds the sender");
     let waited = start.elapsed();
     assert!(waited >= secs(15), "claimed after {waited:?}");
+}
+
+/// A renewal that never answers demotes the holder a margin before its
+/// claim expires, so a rival can't claim while this replica still leads.
+#[tokio::test(start_paused = true)]
+async fn a_hung_renewal_demotes_before_the_claim_expires() {
+    let api = crate::api::recorded::Recorded::default();
+    let (mut rx, _stop, _task) = spawn_elector(api.clone());
+    tokio::time::timeout(secs(5), rx.wait_for(|leader| *leader))
+        .await
+        .expect("elected within the timeout")
+        .expect("the elector holds the sender");
+    let elected = Instant::now();
+    api.hanging::<Lease>("infra", "kinference");
+
+    tokio::time::timeout(secs(60), rx.wait_for(|leader| !*leader))
+        .await
+        .expect("demoted while the renewal hangs")
+        .expect("the elector holds the sender");
+    let led = elected.elapsed();
+    assert!(
+        led >= secs(5) && led <= secs(10),
+        "led for {led:?} of a 15s claim"
+    );
 }

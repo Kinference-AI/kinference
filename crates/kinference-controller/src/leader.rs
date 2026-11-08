@@ -48,7 +48,8 @@ pub struct LeaderElectionConfig {
     #[serde(default = "default_lease_duration_secs")]
     pub lease_duration_secs: u64,
     /// Renew once within this window of expiry. Must be less than
-    /// `lease_duration_secs`.
+    /// `lease_duration_secs`. A holder that hasn't renewed by halfway through
+    /// this window stops writing.
     #[serde(default = "default_renew_grace_secs")]
     pub renew_grace_secs: u64,
     /// Delay before retrying after an apiserver error or a lost race.
@@ -106,6 +107,15 @@ pub struct LeaseParams {
     pub retry: Duration,
 }
 
+impl LeaseParams {
+    /// How long before its claim expires the holder stops leading: half the
+    /// renewal window. The writers get that long to stop before a rival can
+    /// claim.
+    fn margin(&self) -> Duration {
+        self.renew_grace / 2
+    }
+}
+
 impl From<&LeaderElectionConfig> for LeaseParams {
     fn from(c: &LeaderElectionConfig) -> Self {
         Self {
@@ -160,8 +170,17 @@ impl Seen {
             .checked_add(Duration::from_secs(u64::try_from(secs).ok()?))
     }
 
-    fn leads(&self, now: Instant) -> bool {
-        self.ours && self.expiry().is_some_and(|expiry| now < expiry)
+    /// When this replica stops leading: `margin` before its own claim
+    /// expires. `None` when the claim isn't ours.
+    fn leads_until(&self, margin: Duration) -> Option<Instant> {
+        if !self.ours {
+            return None;
+        }
+        self.expiry()?.checked_sub(margin)
+    }
+
+    fn leads(&self, now: Instant, margin: Duration) -> bool {
+        self.leads_until(margin).is_some_and(|until| now < until)
     }
 }
 
@@ -189,6 +208,7 @@ pub async fn run<A: ApiServer>(
     shutdown: impl Future<Output = ()>,
 ) {
     let mut shutdown = std::pin::pin!(shutdown);
+    let margin = params.margin();
     // Kept across re-reads, so that an unchanged claim keeps its `since`.
     let mut seen: Option<Seen> = None;
     // Whether `seen` must be re-read before the next decision.
@@ -199,7 +219,12 @@ pub async fn run<A: ApiServer>(
 
     loop {
         if stale {
-            match fetch_or_create(&api, namespace, &params.name).await {
+            match bounded(
+                params.lease_duration,
+                fetch_or_create(&api, namespace, &params.name),
+            )
+            .await
+            {
                 Ok(lease) => {
                     failing = false;
                     stale = false;
@@ -222,7 +247,14 @@ pub async fn run<A: ApiServer>(
             None => params.retry,
             Some(s) => match next_action(now, s, &identity, params.renew_grace) {
                 Action::Claim => {
-                    match claim(&api, namespace, &identity, s.lease.clone(), &params).await {
+                    // While leading, a renewal must fail before leadership
+                    // lapses, or the channel would stay true past it.
+                    let budget = s
+                        .leads_until(margin)
+                        .filter(|until| now < *until)
+                        .map_or(params.lease_duration, |until| until - now);
+                    let call = claim(&api, namespace, &identity, s.lease.clone(), &params);
+                    match bounded(budget, call).await {
                         Ok(lease) => {
                             failing = false;
                             // `now` precedes the write, so the claim's expiry
@@ -256,7 +288,11 @@ pub async fn run<A: ApiServer>(
             },
         };
 
-        publish(&tx, seen.as_ref().is_some_and(|s| s.leads(Instant::now())));
+        publish(
+            &tx,
+            seen.as_ref()
+                .is_some_and(|s| s.leads(Instant::now(), margin)),
+        );
 
         if !wait.is_zero() {
             tokio::select! {
@@ -266,7 +302,10 @@ pub async fn run<A: ApiServer>(
             }
             // A rival's claim may have been renewed or vacated while we
             // slept; never claim from a stale view.
-            if !seen.as_ref().is_some_and(|s| s.leads(Instant::now())) {
+            if !seen
+                .as_ref()
+                .is_some_and(|s| s.leads(Instant::now(), margin))
+            {
                 stale = true;
             }
         }
@@ -284,6 +323,16 @@ pub async fn run<A: ApiServer>(
         );
     }
     let _ = tx.send(false);
+}
+
+/// Fail `call` after `budget`. kube's own read timeout is minutes long.
+async fn bounded<T>(
+    budget: Duration,
+    call: impl Future<Output = Result<T, kube::Error>>,
+) -> Result<T, kube::Error> {
+    tokio::time::timeout(budget, call)
+        .await
+        .unwrap_or_else(|elapsed| Err(kube::Error::Service(Box::new(elapsed))))
 }
 
 /// Get the lease, creating it empty on first contact. The caller retries an

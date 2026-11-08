@@ -48,6 +48,8 @@ struct Inner {
     absent: HashSet<String>,
     /// Objects whose writes answer 500.
     failing: HashSet<Key>,
+    /// Objects whose writes never answer.
+    hanging: HashSet<Key>,
     writes: Vec<Write>,
     version: u64,
 }
@@ -77,6 +79,11 @@ impl Recorded {
         self.lock().failing.insert(key::<K>(namespace, name));
     }
 
+    /// Writes to this object never answer.
+    pub fn hanging<K: Object>(&self, namespace: &str, name: &str) {
+        self.lock().hanging.insert(key::<K>(namespace, name));
+    }
+
     pub fn heal(&self) {
         self.lock().failing.clear();
     }
@@ -96,6 +103,13 @@ impl Recorded {
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.0.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    async fn stall_if_hanging(&self, key: &Key) {
+        let hanging = self.lock().hanging.contains(key);
+        if hanging {
+            std::future::pending::<()>().await;
+        }
     }
 }
 
@@ -220,6 +234,7 @@ impl ApiServer for Recorded {
     async fn create<K: Object>(&self, namespace: &str, object: &K) -> Result<K, kube::Error> {
         let name = object.meta().name.clone().unwrap_or_default();
         let key = key::<K>(namespace, &name);
+        self.stall_if_hanging(&key).await;
         let mut inner = self.lock();
         inner.check_failing(&key)?;
         if inner.objects.contains_key(&key) {
@@ -238,6 +253,7 @@ impl ApiServer for Recorded {
         object: &K,
     ) -> Result<K, kube::Error> {
         let key = key::<K>(namespace, name);
+        self.stall_if_hanging(&key).await;
         let mut inner = self.lock();
         inner.check_failing(&key)?;
         let Some(current) = inner.objects.get(&key) else {
@@ -267,6 +283,7 @@ impl ApiServer for Recorded {
         object: &K,
     ) -> Result<(), kube::Error> {
         let key = key::<K>(namespace, name);
+        self.stall_if_hanging(&key).await;
         let mut inner = self.lock();
         inner.check_failing(&key)?;
         let mut value = encode(object);
@@ -282,6 +299,7 @@ impl ApiServer for Recorded {
 
     async fn delete<K: Object>(&self, namespace: &str, name: &str) -> Result<(), kube::Error> {
         let key = key::<K>(namespace, name);
+        self.stall_if_hanging(&key).await;
         let mut inner = self.lock();
         inner.check_failing(&key)?;
         if inner.objects.remove(&key).is_none() {
@@ -300,6 +318,7 @@ impl ApiServer for Recorded {
         status: &serde_json::Value,
     ) -> Result<(), kube::Error> {
         let key = key::<K>(namespace, name);
+        self.stall_if_hanging(&key).await;
         let mut inner = self.lock();
         inner.check_failing(&key)?;
         let Some(current) = inner.objects.get(&key) else {
