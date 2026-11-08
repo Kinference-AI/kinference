@@ -114,6 +114,12 @@ impl BodyStore {
         self.max_request_bytes
     }
 
+    /// How long a body may sit unclaimed or unread before kinference releases
+    /// it.
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
     /// `(entries, bytes_in_use)`, for `/metrics` gauges and tests.
     pub fn stats(&self) -> (usize, u64) {
         (

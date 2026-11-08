@@ -12,13 +12,14 @@
 //!   report failures as gRPC status codes.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::Instrument;
 
+use crate::body_store::BodyLease;
 use crate::metrics::PickOutcome;
 use crate::observations::{FinalTokenReport, Qos};
 use crate::service::{KinferenceService, PickAndRecordOutcome};
@@ -261,7 +262,8 @@ impl Picker for KinferenceService {
     ///
     /// Single-shot: the body is released as the stream is handed out, so a
     /// second `PullBody` for the same `response_id` is `NOT_FOUND`. Exactly
-    /// `PickResponse.body_total_bytes` bytes are streamed.
+    /// `PickResponse.body_total_bytes` bytes are streamed. A caller that
+    /// leaves a chunk unread for the body TTL gets `DEADLINE_EXCEEDED`.
     async fn pull_body(
         &self,
         request: Request<PullBodyRequest>,
@@ -269,29 +271,11 @@ impl Picker for KinferenceService {
         let req = request.into_inner();
         let lease = self.bodies.store.take_outbound(req.response_id)?;
 
-        let (tx, rx) = mpsc::channel(PULL_CHANNEL_DEPTH);
-        tokio::spawn(async move {
-            // The body stays charged to the budget until this task ends.
-            let body = lease.body().clone();
-            for slice in body.chunks(PULL_CHUNK_BYTES) {
-                // `send` awaits when the queue is full (backpressure). An error
-                // means the caller went away.
-                if tx
-                    .send(Ok(BodyChunk {
-                        chunk: slice.to_vec(),
-                    }))
-                    .await
-                    .is_err()
-                {
-                    tracing::debug!(
-                        response_id = req.response_id,
-                        "caller stopped pulling the body"
-                    );
-                    return;
-                }
-            }
-        });
-        Ok(Response::new(ReceiverStream::new(rx)))
+        Ok(Response::new(stream_body(
+            lease,
+            req.response_id,
+            self.bodies.store.ttl(),
+        )))
     }
 
     /// First-token report for an earlier `Pick()`. Records the TTFT, logs the
@@ -391,6 +375,47 @@ impl Picker for KinferenceService {
         );
         Ok(Response::new(AbortResponse { released }))
     }
+}
+
+/// Stream `lease` out in chunks. When a chunk waits `stall` for the caller
+/// to read it, the stream ends with `DEADLINE_EXCEEDED` after the queued
+/// chunks, and the lease's bytes go back to the budget at once.
+fn stream_body(
+    lease: BodyLease,
+    response_id: u64,
+    stall: Duration,
+) -> ReceiverStream<Result<BodyChunk, Status>> {
+    // The extra slot is reserved for the stall error, so that error never
+    // waits on the caller.
+    let (tx, rx) = mpsc::channel(PULL_CHANNEL_DEPTH + 1);
+    tokio::spawn(async move {
+        let Ok(tail) = tx.clone().reserve_owned().await else {
+            return;
+        };
+        // The body stays charged to the budget until this task ends.
+        let body = lease.body().clone();
+        for slice in body.chunks(PULL_CHUNK_BYTES) {
+            let chunk = Ok(BodyChunk {
+                chunk: slice.to_vec(),
+            });
+            match tokio::time::timeout(stall, tx.send(chunk)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => {
+                    tracing::debug!(response_id, "caller stopped pulling the body");
+                    return;
+                }
+                Err(_) => {
+                    tracing::debug!(response_id, "body pull stalled");
+                    tail.send(Err(Status::deadline_exceeded(format!(
+                        "body chunk not read within {}s",
+                        stall.as_secs()
+                    ))));
+                    return;
+                }
+            }
+        }
+    });
+    ReceiverStream::new(rx)
 }
 
 /// Re-key a successfully-picked body to `response_id` and build the response

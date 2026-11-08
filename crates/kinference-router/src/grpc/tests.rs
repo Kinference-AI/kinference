@@ -29,3 +29,69 @@ fn a_provider_destination_carries_the_path_and_empty_means_unchanged() {
     };
     assert_eq!(t.path, "", "no declared path sends no path");
 }
+
+const MB: usize = 1024 * 1024;
+
+/// A store holding `body` as an outbound body, and the lease that a
+/// `PullBody` for it takes.
+fn leased(body: &[u8]) -> (Arc<crate::body_store::BodyStore>, BodyLease) {
+    let store = crate::body_store::shared(8 * MB as u64, 8 * MB as u64, Duration::from_secs(60));
+    let mut r = store.reservation();
+    r.charge(body.len() as u64).expect("within budget");
+    let stream_id = store.commit(r, body.to_vec());
+    let response_id = 7;
+    store
+        .begin_pick(stream_id)
+        .expect("ready body")
+        .commit(response_id, Arc::new(body.to_vec()));
+    let lease = store.take_outbound(response_id).expect("outbound body");
+    (store, lease)
+}
+
+/// A caller that reads the whole stream gets exactly the body, and the
+/// bytes go back to the budget.
+#[tokio::test]
+async fn a_pull_streams_the_whole_body_then_releases_it() {
+    use futures::StreamExt as _;
+    let body: Vec<u8> = (0..MB).map(|i| i as u8).collect();
+    let (store, lease) = leased(&body);
+
+    let mut out = Vec::new();
+    let mut stream = stream_body(lease, 7, Duration::from_secs(5));
+    while let Some(chunk) = stream.next().await {
+        out.extend(chunk.expect("no error").chunk);
+    }
+    assert_eq!(out, body);
+    assert_eq!(store.stats().1, 0);
+}
+
+/// A caller that keeps the stream open but stops reading loses the stream
+/// with `DEADLINE_EXCEEDED`, and the body's bytes go back to the budget.
+#[tokio::test]
+async fn a_stalled_pull_releases_the_body() {
+    use futures::StreamExt as _;
+    let body = vec![0u8; MB];
+    let (store, lease) = leased(&body);
+
+    let mut stream = stream_body(lease, 7, Duration::from_millis(20));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while store.stats().1 != 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "an unread pull still holds {} bytes",
+            store.stats().1
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let mut received = 0;
+    let status = loop {
+        match stream.next().await.expect("the stream ends with an error") {
+            Ok(chunk) => received += chunk.chunk.len(),
+            Err(status) => break status,
+        }
+    };
+    assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+    assert_eq!(received, PULL_CHANNEL_DEPTH * PULL_CHUNK_BYTES);
+    assert!(stream.next().await.is_none());
+}
