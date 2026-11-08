@@ -421,6 +421,9 @@ pub struct PoolManager {
     parent: tokio_util::sync::CancellationToken,
     models: Arc<ModelIndex>,
     reap: ReapPolicy,
+    /// Specs that every reconcile keeps live: the config-declared sets, which
+    /// no watch lists.
+    pinned: Vec<PoolSpec>,
 }
 
 impl PoolManager {
@@ -439,17 +442,29 @@ impl PoolManager {
             parent,
             models,
             reap,
+            pinned: Vec::new(),
         }
     }
 
-    /// Bring the live set in line with `desired`.
+    /// Keep `specs` live through every later reconcile, in addition to what
+    /// each reconcile asks for. Takes effect at the next reconcile.
+    pub fn pin(&mut self, specs: Vec<PoolSpec>) {
+        self.pinned = specs;
+    }
+
+    /// Bring the live set in line with `desired` plus the pinned specs.
     ///
-    /// An empty `desired` retires everything, so the caller must not reconcile
-    /// before its watch has listed.
+    /// An empty `desired` retires every pool that isn't pinned, so the caller
+    /// must not reconcile before its watch has listed.
     pub fn reconcile(&mut self, desired: Vec<PoolSpec>) -> ReconcileReport {
         let mut report = ReconcileReport::default();
-        let wanted: BTreeMap<PoolKey, PoolSpec> =
-            desired.into_iter().map(|s| (s.key.clone(), s)).collect();
+        let wanted: BTreeMap<PoolKey, PoolSpec> = self
+            .pinned
+            .iter()
+            .cloned()
+            .chain(desired)
+            .map(|s| (s.key.clone(), s))
+            .collect();
 
         // Retire first, so a replace frees its workers' fleet-wide state before
         // the replacement claims the same ids.

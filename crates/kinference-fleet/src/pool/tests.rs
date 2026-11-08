@@ -253,6 +253,16 @@ async fn create_retire_reap() {
     );
 }
 
+#[tokio::test]
+async fn a_pinned_spec_survives_reconciles_that_omit_it() {
+    let mut h = harness(eager());
+    h.mgr.pin(vec![spec("cfg", 16)]);
+    h.mgr.reconcile(vec![spec("cr", 16)]);
+    let report = h.mgr.reconcile(Vec::new());
+    assert_eq!(report.retired, vec![PoolKey::local("cr")]);
+    assert_eq!(h.mgr.live_keys(), vec![PoolKey::local("cfg")]);
+}
+
 /// A retired pool's indexer keeps answering until it is reaped, since
 /// `KvIndexer` panics if reached after cancellation.
 #[tokio::test]

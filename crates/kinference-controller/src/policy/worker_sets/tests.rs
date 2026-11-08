@@ -626,3 +626,25 @@ async fn a_recorded_set_materializes_through_the_watch() {
     task.await.expect("the watcher exits on cancel");
     assert_eq!(live.iter().next().unwrap().name, "infra/a");
 }
+
+/// Config-declared sets are pinned in the manager, so a watch whose store
+/// lacks them must not retire them.
+#[tokio::test]
+async fn the_watch_keeps_config_declared_sets() {
+    let (mut w, registry) = watcher_with(&[iws("infra", "a", full_spec())], vec![profile("h100")]);
+    let (mut specs, _) = desired_pools(
+        &[iws("infra", "cfg", full_spec())],
+        &[profile("h100")],
+        &DiscoveryDefaults::default(),
+    );
+    let mut spec = specs.pop_first().unwrap().1;
+    spec.key = kinference_policy::PoolKey::local("cfg");
+    spec.name = "cfg".into();
+    w.manager.pin(vec![spec]);
+    w.manager.reconcile(Vec::new());
+
+    w.reconcile_from_store();
+    let mut names: Vec<String> = registry.snapshot().iter().map(|p| p.name.clone()).collect();
+    names.sort();
+    assert_eq!(names, ["cfg", "infra/a"]);
+}

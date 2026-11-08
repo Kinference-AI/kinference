@@ -95,7 +95,9 @@ impl Fleet {
             inbox,
             ..
         } = self;
-        let report = manager.reconcile(specs);
+        // Pinned, so that the worker-set watch's reconciles keep them.
+        manager.pin(specs);
+        let report = manager.reconcile(Vec::new());
         if !report.failed.is_empty() {
             return Err(Error::WorkerSetsFailed(report.failed));
         }
