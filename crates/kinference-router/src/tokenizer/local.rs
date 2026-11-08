@@ -370,8 +370,12 @@ impl LocalTokenizer {
             );
         }
         let model_name_owned = model_name.to_string();
+        let params = tokenizers::FromPretrainedParameters {
+            token: self.config.hub_token.clone(),
+            ..Default::default()
+        };
         let tokenizer = tokio::task::spawn_blocking(move || {
-            Tokenizer::from_pretrained(&model_name_owned, None).map_err(|source| {
+            Tokenizer::from_pretrained(&model_name_owned, Some(params)).map_err(|source| {
                 Error::TokenizerHub {
                     model: model_name_owned.clone(),
                     source,
