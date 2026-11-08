@@ -246,3 +246,22 @@ async fn no_http_url_is_unavailable_without_an_attempt() {
     assert_eq!(attempts, 0);
     assert!(reason.contains("http_url"), "{reason}");
 }
+
+/// The reason for a failed render leaves out the response body, which may
+/// echo the prompt.
+#[tokio::test]
+async fn the_reason_leaves_out_the_response_body() {
+    let rejecting = FakeRender::start(Render::Status(400)).await;
+    let scrape = Arc::new(MetricsRegistry::new());
+    let workers = [(1, at(&rejecting, "10.0.0.1:8000"))];
+    let input = TokenizeInput::Raw("a secret prompt".into());
+
+    let out = backend(&scrape)
+        .render(&request(&workers, "m", input))
+        .await;
+    let TokenizeOutcome::Unavailable { reason, .. } = out else {
+        panic!("{out:?}");
+    };
+    assert!(reason.contains("400"), "{reason}");
+    assert!(!reason.contains("secret"), "{reason}");
+}

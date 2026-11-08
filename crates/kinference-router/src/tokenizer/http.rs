@@ -258,6 +258,21 @@ fn parse_render_response(json: &[u8]) -> Result<Vec<u32>, Error> {
     Ok(obj.token_ids)
 }
 
+/// The token ids in a `/render` response from `url`. On a non-2xx status
+/// the body is read, so the connection can be reused, and then dropped.
+async fn token_ids(resp: reqwest::Response, url: &str) -> Result<Vec<u32>, Error> {
+    let status = resp.status();
+    if !status.is_success() {
+        let _ = resp.bytes().await;
+        return Err(Error::RenderStatus { status });
+    }
+    let bytes = resp.bytes().await.map_err(|source| Error::Render {
+        url: url.to_string(),
+        source,
+    })?;
+    parse_render_response(&bytes)
+}
+
 /// POST `raw_body` verbatim to `{base}/v1/chat/completions/render`.
 async fn render_via_vllm_raw(
     client: &reqwest::Client,
@@ -286,16 +301,7 @@ async fn render_post_raw_at_url(
         .send()
         .await
         .map_err(render)?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(Error::RenderStatus {
-            status,
-            body: body.trim().to_string(),
-        });
-    }
-    let bytes = resp.bytes().await.map_err(render)?;
-    parse_render_response(&bytes)
+    token_ids(resp, url).await
 }
 
 /// [`render_via_vllm_structured`] for a fully-qualified `url`, which must be
@@ -331,16 +337,7 @@ async fn render_structured_at_url(
         ),
     };
     let resp = client.post(url).json(&body).send().await.map_err(render)?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(Error::RenderStatus {
-            status,
-            body: body.trim().to_string(),
-        });
-    }
-    let bytes = resp.bytes().await.map_err(render)?;
-    parse_render_response(&bytes)
+    token_ids(resp, url).await
 }
 
 /// Build a structured body from `input` and POST it to vLLM's
@@ -385,16 +382,7 @@ async fn render_via_vllm_structured(
         source,
     };
     let resp = client.post(&url).json(&body).send().await.map_err(render)?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(Error::RenderStatus {
-            status,
-            body: body.trim().to_string(),
-        });
-    }
-    let bytes = resp.bytes().await.map_err(render)?;
-    parse_render_response(&bytes)
+    token_ids(resp, &url).await
 }
 
 #[cfg(test)]

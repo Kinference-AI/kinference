@@ -13,11 +13,9 @@ pub enum Error {
     },
     /// A `/render` request failed in flight, or its body could not be read.
     Render { url: String, source: reqwest::Error },
-    /// `/render` answered with a non-2xx status.
-    RenderStatus {
-        status: reqwest::StatusCode,
-        body: String,
-    },
+    /// `/render` answered with a non-2xx status. The body is dropped because
+    /// it may echo the prompt.
+    RenderStatus { status: reqwest::StatusCode },
     /// A `/render` body is not the JSON expected; `what` names the step.
     RenderDecode {
         what: &'static str,
@@ -90,9 +88,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::HttpClient { what, .. } => write!(f, "building {what}"),
             Error::Render { url, .. } => write!(f, "POST {url}"),
-            Error::RenderStatus { status, body } => {
-                write!(f, "/render returned {status}: {body}")
-            }
+            Error::RenderStatus { status } => write!(f, "/render returned {status}"),
             Error::RenderDecode { what, .. } => f.write_str(what),
             Error::RenderShape(what) => f.write_str(what),
             Error::TokenizerFile { path, .. } => {
