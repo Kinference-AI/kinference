@@ -33,7 +33,7 @@ pub enum Error {
         model: String,
         source: tokenizers::Error,
     },
-    /// The blocking Hub load was cancelled or panicked.
+    /// A blocking tokenizer load was cancelled or panicked.
     Join(tokio::task::JoinError),
     /// `encode` rejected the input.
     Encode {

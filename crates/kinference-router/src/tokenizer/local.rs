@@ -118,8 +118,7 @@ struct TokenizerConfigMeta {
 }
 
 /// In-process tokenization, falling back to `/render` on any local failure.
-/// Owns the loaded tokenizers, lazily loaded per model (the load itself is
-/// synchronous; a Hub fetch can block briefly), and their warm-up.
+/// Owns the loaded tokenizers, lazily loaded per model, and their warm-up.
 pub struct LocalTokenizer {
     loaded: DashMap<String, Arc<LoadedTokenizer>>,
     config: LocalTokenizeConfig,
@@ -323,37 +322,16 @@ impl LocalTokenizer {
     }
 
     async fn load(&self, model_name: &str) -> Result<Arc<LoadedTokenizer>, Error> {
-        // Mount path first.
-        if let Some(mount_dir) = self.config.mount_dir.as_deref() {
-            let dir = mount_dir.join(model_name);
-            let tok_path = dir.join("tokenizer.json");
-            if tok_path.exists() {
-                tracing::info!(
-                    model = model_name,
-                    path = %tok_path.display(),
-                    "loading the tokenizer from the mount"
-                );
-                let tokenizer =
-                    Tokenizer::from_file(&tok_path).map_err(|source| Error::TokenizerFile {
-                        path: tok_path.clone(),
-                        source,
-                    })?;
-                let meta = read_chat_template_from_config(&dir).unwrap_or_else(|e| {
-                    tracing::debug!(
-                        model = model_name,
-                        error = &e as &dyn StdError,
-                        "no chat template in the mount"
-                    );
-                    TokenizerConfigMeta {
-                        chat_template: None,
-                        special_tokens: HashMap::new(),
-                    }
-                });
-                return Ok(Arc::new(LoadedTokenizer {
-                    tokenizer,
-                    chat_template: meta.chat_template,
-                    special_tokens: meta.special_tokens,
-                }));
+        // The mount first. File reads block, so they run off the runtime.
+        if let Some(mount_dir) = self.config.mount_dir.clone() {
+            let model = model_name.to_string();
+            let mounted = tokio::task::spawn_blocking(move || {
+                load_from_mount(&mount_dir.join(&model), &model)
+            })
+            .await
+            .map_err(Error::Join)??;
+            if let Some(loaded) = mounted {
+                return Ok(Arc::new(loaded));
             }
         }
 
@@ -405,6 +383,40 @@ impl LocalTokenizer {
             special_tokens: meta.special_tokens,
         }))
     }
+}
+
+/// Load `model_name` from its mount directory `dir`. `None` when the mount
+/// has no `tokenizer.json` for it. Blocks on file reads.
+fn load_from_mount(dir: &Path, model_name: &str) -> Result<Option<LoadedTokenizer>, Error> {
+    let tok_path = dir.join("tokenizer.json");
+    if !tok_path.exists() {
+        return Ok(None);
+    }
+    tracing::info!(
+        model = model_name,
+        path = %tok_path.display(),
+        "loading the tokenizer from the mount"
+    );
+    let tokenizer = Tokenizer::from_file(&tok_path).map_err(|source| Error::TokenizerFile {
+        path: tok_path.clone(),
+        source,
+    })?;
+    let meta = read_chat_template_from_config(dir).unwrap_or_else(|e| {
+        tracing::debug!(
+            model = model_name,
+            error = &e as &dyn StdError,
+            "no chat template in the mount"
+        );
+        TokenizerConfigMeta {
+            chat_template: None,
+            special_tokens: HashMap::new(),
+        }
+    });
+    Ok(Some(LoadedTokenizer {
+        tokenizer,
+        chat_template: meta.chat_template,
+        special_tokens: meta.special_tokens,
+    }))
 }
 
 // The HuggingFace type takes the short name here.
