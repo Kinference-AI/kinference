@@ -16,12 +16,6 @@ rules:
   - apiGroups: ["kinference.buoyant.io"]
     resources: ["inferenceworkersets"]
     verbs: ["get", "list", "watch"]
-  # Leader election. `update` because the elector replaces with the last-seen
-  # resourceVersion. Without these verbs no replica leads and no status is
-  # written, so gateways never program routes.
-  - apiGroups: ["coordination.k8s.io"]
-    resources: ["leases"]
-    verbs: ["get", "create", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -33,6 +27,39 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: {{ include "kinference.fullname" . }}-endpointslice-watcher
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kinference.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+{{- $leaseNamespace := dig "leader_election" "namespace" "" (.Values.config | default dict) | default .Release.Namespace }}
+---
+# Leader election, in the Lease's namespace only. `update` because the
+# elector replaces with the last-seen resourceVersion. Without these verbs
+# no replica leads and no status is written, so gateways never program
+# routes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kinference.fullname" . }}-leader-election
+  namespace: {{ $leaseNamespace }}
+  labels:
+    {{- include "kinference.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kinference.fullname" . }}-leader-election
+  namespace: {{ $leaseNamespace }}
+  labels:
+    {{- include "kinference.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kinference.fullname" . }}-leader-election
 subjects:
   - kind: ServiceAccount
     name: {{ include "kinference.fullname" . }}
