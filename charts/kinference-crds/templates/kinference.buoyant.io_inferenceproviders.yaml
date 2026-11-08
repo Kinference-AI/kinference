@@ -87,7 +87,9 @@ spec:
                       items: {type: string, maxLength: 512}
                     contextWindow:
                       description: |-
-                        Required; in bytes.
+                        The model's context window, in tokens. The router
+                        does not check requests against it. A policy can
+                        still drop candidates by it in an exclusion.
                       type: integer
                       minimum: 1
           status:
