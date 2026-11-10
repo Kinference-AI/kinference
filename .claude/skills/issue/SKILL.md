@@ -9,7 +9,13 @@ description: Draft a GitHub issue for this repository from its issue forms, sinc
    for behaviour that differs from the docs, `feature.yml` for something
    Kinference does not do. Read the form.
 2. Size the change. A change that needs more than one pull request is a
-   design, not an issue. Say so, point at the `design` skill, and stop.
+   design. Its issue proposes the design, so that the maintainers can
+   say whether they want the change before anyone writes the document.
+   Fill Why and Today as for any feature, put the shape of the change
+   under What in one paragraph, and under Done say that the design
+   document merges under `design/`. The prior art goes in the document,
+   not in the issue. Once a maintainer accepts the issue, the `design`
+   skill writes the document.
 3. For a feature, interview the user until every field of the form has
    an answer. Ask one question at a time, and give your recommended
    answer with it, so that "yes" accepts it. Never ask for a fact that
