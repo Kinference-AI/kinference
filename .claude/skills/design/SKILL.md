@@ -50,11 +50,8 @@ ARCHITECTURE.md before you start.
    Break-down leaves main unshippable between pull requests, and where
    a sentence breaks the prose rules in AGENTS.md. Answer each finding
    in the document, or carry it into Open questions with who decides.
-6. Check the prose. Read the prose rules in AGENTS.md again and
-   check every sentence of the draft against them: one main claim per
-   sentence, no aside inserted mid-sentence, one explicit antecedent
-   for every pronoun, and the project's own terms. Rewrite each
-   sentence that fails.
+6. Check every sentence of the draft against the prose rules in
+   AGENTS.md, and rewrite each sentence that fails.
 7. Show the user the path and the Summary, Proposal and Break-down
    sections. Revise until they approve. Commit the document only when
    the user asks. The `pr` skill drafts the pull request description.

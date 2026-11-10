@@ -41,11 +41,8 @@ description: Draft a GitHub issue for this repository from its issue forms, sinc
    the path.
 8. State what happened and what you expected as facts, and keep a
    suspected cause under "Where in the code" marked as a guess.
-9. Check the prose. Read the prose rules in AGENTS.md again and
-   check every sentence of the draft against them: one main claim per
-   sentence, no aside inserted mid-sentence, one explicit antecedent
-   for every pronoun, and the project's own terms. Rewrite each
-   sentence that fails.
+9. Check every sentence of the draft against the prose rules in
+   AGENTS.md, and rewrite each sentence that fails.
 10. Show the title and body to the user. File the issue only when the
     user asks, with `gh issue create --title ... --label <the form's
     labels> --body-file -`.

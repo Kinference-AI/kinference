@@ -54,11 +54,8 @@ description: Draft a pull request title and description for the current branch i
 8. A branch with one commit still gets a merge commit. Its body is a
    shorter summary of that commit, not a copy of the commit body.
    CONTRIBUTING.md shows two filled-in examples.
-9. Check the prose. Read the prose rules in AGENTS.md again and
-   check every sentence of the draft against them: one main claim per
-   sentence, no aside inserted mid-sentence, one explicit antecedent
-   for every pronoun, and the project's own terms. Rewrite each
-   sentence that fails.
+9. Check every sentence of the draft against the prose rules in
+   AGENTS.md, and rewrite each sentence that fails.
 10. Show the title and body to the user. Open the PR only when the user
     asks, with `gh pr create --base <base branch> --title ... --body-file -`,
     where the base branch is `main` or the lower pull request's head
