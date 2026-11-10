@@ -47,6 +47,13 @@ whether its reason applies here.>
 messages, metric names, and what an operator has to do about them. Or
 "None." and why.>
 
+## Compatibility and rollout
+
+<What keeps working across the upgrade and what breaks: an existing
+config file, a CRD object, a BackendBinding, a gateway on the previous
+picker protocol. The order in which the operator upgrades the pieces,
+and whether a rollback works. Or "None." and why.>
+
 ## Break-down
 
 <One line per pull request, in the order they land, each one leaving
