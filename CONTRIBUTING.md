@@ -87,19 +87,10 @@ PR and does not open the commits. `git revert -m 1` reverts a PR as a
 unit, so the merge commit is the record of what the PR delivered.
 
 - Title: the whole change, in the imperative, under ~72 characters.
-- Description: five labeled parts, in this order. Each label stands on
-  its own line as plain text, followed by one or more paragraphs.
-  1. `Problem`: what is wrong or missing today, and why it matters. Start
-     from the symptom, not from the code.
-  2. `Solution`: what is different once the PR is merged, as a reader of
-     `main` sees it. For several commits, the overall shape. For one
-     commit, a sentence or two that does not repeat the commit body.
-  3. `Operator-visible changes`: config fields, environment variables,
-     chart values, CRD fields, proto messages, metric names, and what an
-     operator has to do about them.
-  4. `Validation`: what you ran beyond CI, against what, and what you saw.
-  5. `Issues`: `Closes #N` for each issue the PR closes, and work that the
-     PR leaves out.
+- Description: the five labeled parts of
+  `.github/pull_request_template.md`, in its order. Each label stands
+  on its own line as plain text, followed by one or more paragraphs.
+  The template says what goes under each label.
 - A part that does not apply keeps its label and says in one sentence
   why: "None. The change touches only Rust internals." The sentence
   tells the reader that you checked.

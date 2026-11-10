@@ -1,9 +1,12 @@
 ---
 name: pr
-description: Draft a pull request title and description for the current branch in the shape that AGENTS.md requires. The description becomes the merge commit message. Use when asked to open, write or fix a PR.
+description: Draft a pull request title and description for the current branch in the shape that CONTRIBUTING.md and the pull request template require. The description becomes the merge commit message. Use when asked to open, write or fix a PR.
 ---
 
 # Draft a pull request
+
+Read the "Pull requests" section of CONTRIBUTING.md and
+`.github/pull_request_template.md` before you start.
 
 1. Find the base. The base is `origin/main`, unless the branch forks
    from the head branch of another open pull request. Then the base is
@@ -28,32 +31,18 @@ description: Draft a pull request title and description for the current branch i
 5. Title: one line in the imperative, under 72 characters, that names the
    whole change. Not the first commit's subject unless it covers the
    branch.
-6. Body: five parts in this order, each introduced by its label alone on
-   a line, as plain text. No markdown headings, bold, task lists, links to
-   this conversation, or attribution footer.
-   1. `Problem`: what is wrong or missing today, and why it matters.
-      Start from the symptom, not from the code.
-   2. `Solution`: what is different once the PR is merged. For several
-      commits, the overall shape. For one commit, a sentence or two that
-      does not repeat the commit body.
-   3. `Operator-visible changes`: config fields, environment variables,
-      chart values, CRD fields, proto messages, metric names, and what an
-      operator has to do about them.
-   4. `Validation`: what was run beyond CI, against what, and what it
-      showed. When Operator-visible changes is not "None", the branch
-      has run on a kind cluster: `just up`, `just test-smoke` and the
-      steps in docs/local-development.md that exercise the change, then
-      `just down`. Say what the run showed. When you cannot run it, say
-      that it was not run.
-   5. `Issues`: `Closes #N` for each issue the PR closes, and work left
-      out. A stacked pull request also names the pull request that it
-      builds on and says that it merges after that one.
-7. A part that does not apply keeps its label and says in one sentence
-   why: "None. The change touches only Rust internals." Never drop a
-   label and never write a bare "None".
-8. A branch with one commit still gets a merge commit. Its body is a
-   shorter summary of that commit, not a copy of the commit body.
-   CONTRIBUTING.md shows two filled-in examples.
+6. Body: the five parts of `.github/pull_request_template.md`, in its
+   order. Replace each comment in the template with the paragraphs
+   that it asks for, and keep every label, as the "Pull requests"
+   section of CONTRIBUTING.md says. No markdown headings, bold, task
+   lists, links to this conversation, or attribution footer.
+7. When Operator-visible changes is not "None", the branch has run on
+   a kind cluster: `just up`, `just test-smoke` and the steps in
+   docs/local-development.md that exercise the change, then
+   `just down`. Say under Validation what the run showed. When you
+   cannot run it, say that it was not run.
+8. A stacked pull request names under Issues the pull request that it
+   builds on and says that it merges after that one.
 9. Check every sentence of the draft against the prose rules in
    AGENTS.md, and rewrite each sentence that fails.
 10. Show the title and body to the user. Open the PR only when the user
