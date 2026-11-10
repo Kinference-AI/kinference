@@ -1,5 +1,5 @@
 <!-- The title and this description become the merge commit message.
-CONTRIBUTING.md says how to write them. Keep the five labels and their
+CONTRIBUTING.md says how to write them. Keep the six labels and their
 order. Replace each comment with one short paragraph that says what
 changed and why. Leave out what the diff and the docs already say. A
 part that does not apply says in one sentence why. -->
@@ -20,6 +20,13 @@ Operator-visible changes
 <!-- Config fields, environment variables, chart values, CRD fields,
 proto messages, metric names, and what an operator has to do about
 them. -->
+
+Compatibility and rollout
+
+<!-- Whether a running deployment survives the upgrade: an existing
+config file, a chart values file, a CRD object, a BackendBinding, a
+gateway on the previous picker protocol. The order in which the
+operator upgrades the pieces, and whether a rollback works. -->
 
 Validation
 

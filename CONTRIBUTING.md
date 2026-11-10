@@ -92,7 +92,7 @@ unit, so the merge commit is the record of what the PR delivered.
 - Keep it short. One paragraph per part says what changed and why.
   Reasons, lists and per-file detail go in the docs or the commits
   that the PR carries, not in the description.
-- Description: the five labeled parts of
+- Description: the six labeled parts of
   `.github/pull_request_template.md`, in its order. Each label stands
   on its own line as plain text, followed by one or more paragraphs.
   The template says what goes under each label.
@@ -132,6 +132,12 @@ variable and the chart's observationsCsv value, volume and mount are
 gone. A new KINFERENCE_LOG_FORMAT=json option, set by the chart's
 logFormat value, lets a pipeline parse the fields. An operator who
 collected the CSV switches to the jq recipe in docs/local-development.md.
+
+Compatibility and rollout
+
+A router that still receives KINFERENCE_OBSERVATIONS_CSV ignores the
+variable, and a values file that still sets observationsCsv upgrades
+without an error. Rolling the chart back restores the sink.
 
 Validation
 
