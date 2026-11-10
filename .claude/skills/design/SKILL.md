@@ -37,9 +37,10 @@ AGENTS.md and ARCHITECTURE.md before you start.
    instructions. Each subagent returns a table with project, mechanism,
    trade-off, applies here or not, source and date.
 5. Draft the document from `design/TEMPLATE.md` as
-   `design/<YYYY-MM-DD>-<slug>.md` with Status Draft. The Proposal
-   stops at crates, modules, types and contracts. A design that
-   specifies the code has written the code. The Prior art section is
+   `design/<YYYY-MM-DD>-<slug>.md`, with the issue number and
+   `status: draft` in the front matter. The Proposal stops at crates,
+   modules, types and contracts. A design that specifies the code has
+   written the code. The Prior art section is
    the research, pruned to what bears on the decision, and for each
    approach it says where that approach falls short for Kinference.
    The prior art does not bound the Proposal: combine approaches from
@@ -62,4 +63,4 @@ AGENTS.md and ARCHITECTURE.md before you start.
    sections. Revise until they approve. Commit the document only when
    the user asks. The `pr` skill drafts the pull request description,
    and the pull request closes the issue. The last commit before merge
-   sets Status to Accepted.
+   sets `status` to `accepted`.

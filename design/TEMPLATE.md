@@ -1,8 +1,13 @@
-# <Title: the change, in the imperative>
+---
+# status is draft, accepted, implemented or superseded. A superseded
+# design adds superseded_by with the path of the design that replaces it.
+status: draft
+date: <YYYY-MM-DD>
+author: <name>
+issue: <N>
+---
 
-Status: Draft | Accepted | Implemented | Superseded by <path>
-Date: <YYYY-MM-DD>
-Author: <name>
+# <Title: the change, in the imperative>
 
 ## Summary
 
