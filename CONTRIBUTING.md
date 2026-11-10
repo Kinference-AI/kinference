@@ -6,9 +6,11 @@ without being asked.
 
 ## Issues
 
-Open a bug report or a feature request through the issue forms. Wait
-for a maintainer to accept the issue before you open a pull request for
-it. For a question, use
+Open a bug report or a feature request through the issue forms. Every
+pull request closes an issue that a maintainer has accepted with the
+`accepted` label. [docs/workflow.md](docs/workflow.md) describes the
+flow from an issue to a merge, and the design step that a maintainer
+inserts for a large change or a contract change. For a question, use
 [GitHub discussions](https://github.com/Kinference-AI/kinference/discussions).
 
 Treat a bug report as a claim, not a fact. Read the report's manifests,
