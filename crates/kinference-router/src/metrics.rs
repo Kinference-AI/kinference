@@ -120,7 +120,7 @@ const TOKENIZE_PATHS: [&str; 3] = ["local", "http_fallback", "unavailable"];
 
 /// `kinference_tokenize_compare_total{result}`. Source: `crate::tokenizer`.
 /// Only moves in compare mode.
-const TOKENIZE_COMPARE_RESULTS: [&str; 3] = ["match", "divergence", "error"];
+const TOKENIZE_COMPARE_RESULTS: [&str; 4] = ["match", "divergence", "error", "skipped"];
 
 /// `kinference_body_rejected_total{reason}`.
 /// Source: [`crate::body_store::RejectReason::as_label`].
@@ -546,7 +546,8 @@ impl RouterMetrics {
             registry,
             "kinference_tokenize_compare_total",
             "Compare-mode agreement between the local tokenizer and the engine's \
-                 /render: match, divergence, error. A DIVERGENCE means every prefix \
+                 /render: match, divergence, error, or skipped when too many \
+                 comparisons were running. A DIVERGENCE means every prefix \
                  block hash is wrong, so cache-affinity routing silently stops \
                  working while the prefix metrics still report plausible numbers. \
                  Only ever non-zero when tokenize.mode = compare",
