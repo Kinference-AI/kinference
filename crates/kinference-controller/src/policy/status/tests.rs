@@ -1455,3 +1455,35 @@ async fn shutdown_does_not_count_a_leader_election_error() {
         );
     }
 }
+
+/// A leader whose elector drops the leader channel stops writing.
+#[tokio::test(start_paused = true)]
+async fn a_closed_leader_channel_stops_writes() {
+    let (api, index) = recorded_cluster();
+    let ((w, tx), registry) = writer_over(api.clone(), true);
+    w.store.publish(index);
+    drop(tx);
+
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn(w.run(cancel.clone()));
+    // Two ticks past the first.
+    tokio::time::sleep(std::time::Duration::from_secs(25)).await;
+    cancel.cancel();
+    task.await.expect("the writer does not panic");
+
+    assert!(api.writes().is_empty(), "wrote {:?}", api.writes());
+    assert!(render(&registry).contains("kinference_leader 0"));
+}
+
+/// A reconcile that starts after demotion writes nothing.
+#[tokio::test]
+async fn a_demoted_reconcile_writes_nothing() {
+    let (api, index) = recorded_cluster();
+    let ((w, tx), _) = writer_over(api.clone(), true);
+    w.store.publish(index);
+    tx.send(false).expect("the writer holds the receiver");
+
+    w.reconcile_once().await;
+
+    assert!(api.writes().is_empty(), "wrote {:?}", api.writes());
+}

@@ -299,17 +299,16 @@ impl<A: ApiServer> BindingWriter<A> {
                                 );
                             }
                         }
-                        // Elector gone; hold the last known state.
+                        // Elector gone. Nothing renews the lease now, so a
+                        // rival can claim it: stop writing.
                         Err(_) => {
                             leader_open = false;
-                            tracing::error!(
-                                "leader channel closed; keeping the last leadership state"
-                            );
+                            tracing::error!("leader channel closed; stopping writes");
                         }
                     }
                 }
                 _ = interval.tick() => {
-                    if !*self.leader.borrow() {
+                    if !self.leading() {
                         continue;
                     }
                     match self.reconcile_once().await {
@@ -324,6 +323,12 @@ impl<A: ApiServer> BindingWriter<A> {
                 }
             }
         }
+    }
+
+    /// Whether this replica may write. A closed leader channel counts as
+    /// lost leadership.
+    fn leading(&self) -> bool {
+        self.leader.has_changed().is_ok() && *self.leader.borrow()
     }
 
     async fn reconcile_once(&self) -> Result<(), Error> {
@@ -420,6 +425,10 @@ impl<A: ApiServer> BindingWriter<A> {
                     continue;
                 }
             }
+            // A reconcile spans many writes, and leadership can end midway.
+            if !self.leading() {
+                return Ok(());
+            }
             // Server-side apply covers both create and update. `apply` forces,
             // taking back fields another manager grabbed; otherwise the apply
             // would conflict on every tick and never converge.
@@ -448,6 +457,9 @@ impl<A: ApiServer> BindingWriter<A> {
             }
             if binding.meta().deletion_timestamp.is_some() {
                 continue;
+            }
+            if !self.leading() {
+                return Ok(());
             }
             match self.api.delete::<BackendBinding>(&ns, &name).await {
                 Ok(_) => tracing::info!(

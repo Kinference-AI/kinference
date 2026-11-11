@@ -1,15 +1,16 @@
 //! Leader election over a `coordination.k8s.io/v1` Lease.
 //!
 //! Exactly one replica writes CRD status and `BackendBinding`s; every
-//! replica still routes. The claiming
-//! rules: the holder renews inside a grace window before expiry, a
-//! rival waits out the current claim's expiry before trying,
-//! takeovers bump `leaseTransitions`, and a
-//! clean shutdown vacates the lease so the peer takes over
-//! immediately. Writes are optimistic-concurrency replaces (the
-//! `resourceVersion` of the last-seen lease rides along), so two
-//! replicas racing for the same claim cannot both win: the loser
-//! gets a conflict, re-reads, and backs off.
+//! replica still routes. The holder renews inside a grace window before
+//! expiry. A rival waits out the current claim before trying. Takeovers
+//! bump `leaseTransitions`, and a clean shutdown vacates the lease so that
+//! the peer takes over at once. Each replica times a claim on its own
+//! monotonic clock, from when it first saw that claim, and never from the
+//! holder's `renewTime`. Clock skew between replicas therefore can't cut a
+//! claim short. Writes are optimistic-concurrency replaces that send the
+//! `resourceVersion` of the last-seen lease. Two replicas that race for
+//! the same claim therefore can't both win: the loser gets a conflict,
+//! re-reads, and backs off.
 
 use std::error::Error as StdError;
 use std::time::Duration;
@@ -20,6 +21,7 @@ use k8s_openapi::jiff::Timestamp;
 use kube::api::ObjectMeta;
 use serde::Deserialize;
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 use crate::api::ApiServer;
 
@@ -46,7 +48,8 @@ pub struct LeaderElectionConfig {
     #[serde(default = "default_lease_duration_secs")]
     pub lease_duration_secs: u64,
     /// Renew once within this window of expiry. Must be less than
-    /// `lease_duration_secs`.
+    /// `lease_duration_secs`. A holder that hasn't renewed by halfway through
+    /// this window stops writing.
     #[serde(default = "default_renew_grace_secs")]
     pub renew_grace_secs: u64,
     /// Delay before retrying after an apiserver error or a lost race.
@@ -104,6 +107,15 @@ pub struct LeaseParams {
     pub retry: Duration,
 }
 
+impl LeaseParams {
+    /// How long before its claim expires the holder stops leading: half the
+    /// renewal window. The writers get that long to stop before a rival can
+    /// claim.
+    fn margin(&self) -> Duration {
+        self.renew_grace / 2
+    }
+}
+
 impl From<&LeaderElectionConfig> for LeaseParams {
     fn from(c: &LeaderElectionConfig) -> Self {
         Self {
@@ -115,16 +127,73 @@ impl From<&LeaderElectionConfig> for LeaseParams {
     }
 }
 
-/// What the elector should do next, decided from the last-known
-/// lease state. Pure so the claiming rules are unit-testable.
+/// The last Lease that this replica read or wrote, timed on its own clock.
+#[derive(Debug, Clone)]
+struct Seen {
+    lease: Lease,
+    /// When this replica first read the current spec, or sent the claim
+    /// that wrote it.
+    since: Instant,
+    /// This process wrote the current spec. A claim under our identity that
+    /// an earlier process left is re-taken, not trusted.
+    ours: bool,
+}
+
+impl Seen {
+    /// Fold a freshly read `lease` into `prev`. An unchanged spec keeps
+    /// `prev`'s `since` and `ours`.
+    fn observe(prev: Option<Seen>, lease: Lease, now: Instant) -> Seen {
+        match prev {
+            Some(p) if p.lease.spec == lease.spec => Seen {
+                lease,
+                since: p.since,
+                ours: p.ours,
+            },
+            _ => Seen {
+                lease,
+                since: now,
+                ours: false,
+            },
+        }
+    }
+
+    fn holder(&self) -> Option<&str> {
+        let spec = self.lease.spec.as_ref()?;
+        spec.holder_identity.as_deref().filter(|h| !h.is_empty())
+    }
+
+    /// When the current claim lapses on this replica's clock. `None` for a
+    /// claim without a valid duration.
+    fn expiry(&self) -> Option<Instant> {
+        let secs = self.lease.spec.as_ref()?.lease_duration_seconds?;
+        self.since
+            .checked_add(Duration::from_secs(u64::try_from(secs).ok()?))
+    }
+
+    /// When this replica stops leading: `margin` before its own claim
+    /// expires. `None` when the claim isn't ours.
+    fn leads_until(&self, margin: Duration) -> Option<Instant> {
+        if !self.ours {
+            return None;
+        }
+        self.expiry()?.checked_sub(margin)
+    }
+
+    fn leads(&self, now: Instant, margin: Duration) -> bool {
+        self.leads_until(margin).is_some_and(|until| now < until)
+    }
+}
+
+/// What the elector should do next, decided from the last-seen
+/// lease. Pure so the claiming rules are unit-testable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
-    /// Write a claim now (free, expired, malformed, or ours and due
-    /// for renewal).
+    /// Write a claim now: the lease is free, expired, malformed, or ours
+    /// and due for renewal.
     Claim,
-    /// Sleep until this instant, then re-decide (someone else's
-    /// claim is current, or ours doesn't need renewing yet).
-    WaitUntil(Timestamp),
+    /// Sleep until this instant, then re-decide. Someone else's claim is
+    /// current, or ours doesn't need renewing yet.
+    WaitUntil(Instant),
 }
 
 /// Run the elector until `shutdown` resolves, publishing leadership
@@ -139,17 +208,27 @@ pub async fn run<A: ApiServer>(
     shutdown: impl Future<Output = ()>,
 ) {
     let mut shutdown = std::pin::pin!(shutdown);
-    let mut known: Option<Lease> = None;
+    let margin = params.margin();
+    // Kept across re-reads, so that an unchanged claim keeps its `since`.
+    let mut seen: Option<Seen> = None;
+    // Whether `seen` must be re-read before the next decision.
+    let mut stale = true;
     // Whether the current run of lease API failures has been logged; reset on
     // success, so a failure after a recovery warns again.
     let mut failing = false;
 
     loop {
-        if known.is_none() {
-            known = match fetch_or_create(&api, namespace, &params.name).await {
+        if stale {
+            match bounded(
+                params.lease_duration,
+                fetch_or_create(&api, namespace, &params.name),
+            )
+            .await
+            {
                 Ok(lease) => {
                     failing = false;
-                    Some(lease)
+                    stale = false;
+                    seen = Some(Seen::observe(seen.take(), lease, Instant::now()));
                 }
                 Err(e) => {
                     if !std::mem::replace(&mut failing, true) {
@@ -158,43 +237,62 @@ pub async fn run<A: ApiServer>(
                             "failed to read or create the lease; retrying"
                         );
                     }
-                    None
                 }
-            };
+            }
         }
 
-        let now = Timestamp::now();
-        let wait = match next_action(now, spec_of(known.as_ref()), &identity, params.renew_grace) {
-            Action::Claim => match known.take() {
-                // Fetch failed above: retry it.
-                None => params.retry,
-                Some(prev) => match claim(&api, namespace, &identity, prev, now, &params).await {
-                    Ok(lease) => {
-                        failing = false;
-                        known = Some(lease);
-                        // Successful claims re-decide immediately and
-                        // land in WaitUntil; rejections re-read first.
-                        Duration::ZERO
-                    }
-                    Err(e) => {
-                        if !is_conflict(&e) && !std::mem::replace(&mut failing, true) {
-                            tracing::warn!(
-                                error = &e as &dyn StdError,
-                                "lease claim failed; retrying"
-                            );
+        let now = Instant::now();
+        let wait = match seen.as_mut().filter(|_| !stale) {
+            // The read above failed: retry it.
+            None => params.retry,
+            Some(s) => match next_action(now, s, &identity, params.renew_grace) {
+                Action::Claim => {
+                    // While leading, a renewal must fail before leadership
+                    // lapses, or the channel would stay true past it.
+                    let budget = s
+                        .leads_until(margin)
+                        .filter(|until| now < *until)
+                        .map_or(params.lease_duration, |until| until - now);
+                    let call = claim(&api, namespace, &identity, s.lease.clone(), &params);
+                    match bounded(budget, call).await {
+                        Ok(lease) => {
+                            failing = false;
+                            // `now` precedes the write, so the claim's expiry
+                            // on our clock is never later than on a rival's.
+                            *s = Seen {
+                                lease,
+                                since: now,
+                                ours: true,
+                            };
+                            // Re-decide at once, which lands in WaitUntil.
+                            Duration::ZERO
                         }
-                        params.retry
+                        Err(e) => {
+                            if !is_conflict(&e) && !std::mem::replace(&mut failing, true) {
+                                tracing::warn!(
+                                    error = &e as &dyn StdError,
+                                    "lease claim failed; retrying"
+                                );
+                            }
+                            s.ours = false;
+                            stale = true;
+                            params.retry
+                        }
                     }
-                },
+                }
+                // Wake just past the boundary so the re-decide lands on the
+                // other side of it.
+                Action::WaitUntil(t) => {
+                    t.saturating_duration_since(now) + Duration::from_millis(100)
+                }
             },
-            Action::WaitUntil(t) => {
-                // Wake just past the boundary so the re-decide lands
-                // on the other side of it.
-                millis_until(now, t) + Duration::from_millis(100)
-            }
         };
 
-        publish(&tx, spec_of(known.as_ref()), &identity, Timestamp::now());
+        publish(
+            &tx,
+            seen.as_ref()
+                .is_some_and(|s| s.leads(Instant::now(), margin)),
+        );
 
         if !wait.is_zero() {
             tokio::select! {
@@ -202,26 +300,40 @@ pub async fn run<A: ApiServer>(
                 () = &mut shutdown => break,
                 () = tokio::time::sleep(wait) => {}
             }
-            // A rival's claim may have been renewed (or vacated)
-            // while we slept; never claim from a stale view.
-            if !is_current_holder(spec_of(known.as_ref()), &identity, Timestamp::now()) {
-                known = None;
+            // A rival's claim may have been renewed or vacated while we
+            // slept; never claim from a stale view.
+            if !seen
+                .as_ref()
+                .is_some_and(|s| s.leads(Instant::now(), margin))
+            {
+                stale = true;
             }
         }
     }
 
-    // Held at shutdown: vacate so the peer claims immediately
-    // instead of waiting out our expiry.
-    if is_current_holder(spec_of(known.as_ref()), &identity, Timestamp::now())
-        && let Some(lease) = known
-        && let Err(e) = vacate(&api, namespace, lease, &params.name).await
+    // Demote before vacating, so the writers stop before the peer claims.
+    let _ = tx.send(false);
+    // Vacate a claim that we wrote, so the peer claims at once instead of
+    // waiting out our expiry. Optimistic concurrency keeps this from
+    // clearing a rival's newer claim.
+    if let Some(s) = seen.filter(|s| s.ours)
+        && let Err(e) = vacate(&api, namespace, s.lease, &params.name).await
     {
         tracing::warn!(
             error = &e as &dyn StdError,
             "failed to vacate lease on shutdown"
         );
     }
-    let _ = tx.send(false);
+}
+
+/// Fail `call` after `budget`. kube's own read timeout is minutes long.
+async fn bounded<T>(
+    budget: Duration,
+    call: impl Future<Output = Result<T, kube::Error>>,
+) -> Result<T, kube::Error> {
+    tokio::time::timeout(budget, call)
+        .await
+        .unwrap_or_else(|elapsed| Err(kube::Error::Service(Box::new(elapsed))))
 }
 
 /// Get the lease, creating it empty on first contact. The caller retries an
@@ -257,21 +369,13 @@ async fn fetch_or_create<A: ApiServer>(
     }
 }
 
-/// Decide from the last-known lease state.
-fn next_action(
-    now: Timestamp,
-    spec: Option<&LeaseSpec>,
-    identity: &str,
-    renew_grace: Duration,
-) -> Action {
-    let Some(spec) = spec else {
+/// Decide from the last-seen lease.
+fn next_action(now: Instant, seen: &Seen, identity: &str, renew_grace: Duration) -> Action {
+    let Some(holder) = seen.holder() else {
         return Action::Claim;
     };
-    let Some(holder) = spec.holder_identity.as_deref().filter(|h| !h.is_empty()) else {
-        return Action::Claim;
-    };
-    // A claim without renew time or duration can't be honored.
-    let Some(expiry) = expiry_of(spec) else {
+    // A claim without a duration can't be honored.
+    let Some(expiry) = seen.expiry() else {
         return Action::Claim;
     };
     if now >= expiry {
@@ -280,11 +384,12 @@ fn next_action(
     if holder != identity {
         return Action::WaitUntil(expiry);
     }
-    let renew_at = expiry - renew_grace;
-    if now >= renew_at {
-        Action::Claim
-    } else {
-        Action::WaitUntil(renew_at)
+    if !seen.ours {
+        return Action::Claim;
+    }
+    match expiry.checked_sub(renew_grace) {
+        Some(renew_at) if now < renew_at => Action::WaitUntil(renew_at),
+        _ => Action::Claim,
     }
 }
 
@@ -297,9 +402,9 @@ async fn claim<A: ApiServer>(
     namespace: &str,
     identity: &str,
     mut prev: Lease,
-    now: Timestamp,
     params: &LeaseParams,
 ) -> Result<Lease, kube::Error> {
+    let now = Timestamp::now();
     let prev_spec = prev.spec.take().unwrap_or_default();
     let renewal = prev_spec.holder_identity.as_deref() == Some(identity);
     let transitions = prev_spec.lease_transitions.unwrap_or(0);
@@ -345,8 +450,7 @@ async fn vacate<A: ApiServer>(
     Ok(())
 }
 
-fn publish(tx: &watch::Sender<bool>, spec: Option<&LeaseSpec>, identity: &str, now: Timestamp) {
-    let leader = is_current_holder(spec, identity, now);
+fn publish(tx: &watch::Sender<bool>, leader: bool) {
     tx.send_if_modified(|v| {
         if *v == leader {
             false
@@ -356,28 +460,6 @@ fn publish(tx: &watch::Sender<bool>, spec: Option<&LeaseSpec>, identity: &str, n
             true
         }
     });
-}
-
-fn is_current_holder(spec: Option<&LeaseSpec>, identity: &str, now: Timestamp) -> bool {
-    spec.is_some_and(|s| {
-        s.holder_identity.as_deref() == Some(identity)
-            && expiry_of(s).is_some_and(|expiry| now < expiry)
-    })
-}
-
-fn expiry_of(spec: &LeaseSpec) -> Option<Timestamp> {
-    let MicroTime(renewed) = spec.renew_time.as_ref()?;
-    let secs = spec.lease_duration_seconds?;
-    Timestamp::from_millisecond(renewed.as_millisecond() + i64::from(secs) * 1000).ok()
-}
-
-fn spec_of(lease: Option<&Lease>) -> Option<&LeaseSpec> {
-    lease.and_then(|l| l.spec.as_ref())
-}
-
-fn millis_until(now: Timestamp, target: Timestamp) -> Duration {
-    u64::try_from(target.as_millisecond() - now.as_millisecond())
-        .map_or(Duration::ZERO, Duration::from_millis)
 }
 
 fn is_conflict(err: &kube::Error) -> bool {
