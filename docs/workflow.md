@@ -14,10 +14,10 @@ that close it. A maintainer inserts a design step for some changes.
 
 ```mermaid
 flowchart TD
-    I["1. Issue<br/>filed through a form"] --> T["2. Triage<br/>accepted, or wontfix"]
+    I["1. Issue<br/>filed through a form"] --> T["2. Triage<br/>accepted, needs-design, or wontfix"]
     T -->|needs-design| D["3. Design<br/>document merges, sub-issues filed"]
-    T --> P["4. Pull request<br/>one per issue or sub-issue"]
-    D --> P
+    T -->|accepted| P["4. Pull request<br/>one per issue or sub-issue"]
+    D -->|accepted| P
     P --> M["5. Merge<br/>the issue closes"]
 ```
 
@@ -29,12 +29,12 @@ one asks for what a maintainer needs in order to decide.
 
 ## 2. Triage
 
-A maintainer applies `accepted`, or closes the issue with `wontfix`.
-A maintainer applies `needs-design` at triage as well. The Labels
-section says what calls for `needs-design`. An issue with
-`needs-design` is a proposal. On a proposal, `accepted` greenlights a
-design, not an implementation. The maintainers decide here whether
-they want the change at all, before anyone spends time on a document.
+A maintainer applies `accepted`, applies `needs-design`, or closes
+the issue with `wontfix`. The Labels section says what calls for
+`needs-design`. An issue with `needs-design` is a proposal. The
+maintainers decide here whether they want the change at all, before
+anyone spends time on a document. A proposal earns `accepted` when
+its design merges.
 
 ## 3. Design
 
@@ -54,7 +54,7 @@ The design is a pull request. Its Issues part says `Part of #N` with
 the proposal's number, and the pull request does not close the
 proposal. The maintainers review the design in that pull request. The
 last commit before the merge sets `status: accepted`. A maintainer
-merges, and removes `needs-design` from the proposal.
+merges, and replaces `needs-design` on the proposal with `accepted`.
 
 After the design merges, the contributor files one feature request per
 line of the Break-down section. Each one is a sub-issue of the
@@ -100,10 +100,9 @@ own sub-issue. That merge closes the parent.
 
 ## Labels
 
-- `accepted`: a maintainer greenlit the issue. On a proposal with
-  `needs-design`, the greenlight covers a design and, once the design
-  merges, every sub-issue of the proposal. On any other issue, the
-  greenlight covers an implementation.
+- `accepted`: a maintainer greenlit an implementation. A proposal
+  earns the label when its design merges, and the label then covers
+  every sub-issue of the proposal.
 - `needs-design`: the next step for the issue is a design document,
   not code. Only a maintainer applies the label, at triage or during
   review of a pull request, when any one of these holds:
@@ -120,5 +119,8 @@ own sub-issue. That merge closes the parent.
     of `resolve`, or the locking rules.
   - The maintainer wants the choice between alternatives recorded.
 
-  A maintainer removes the label when the design merges.
+  A maintainer who applies `needs-design` during review removes
+  `accepted` from the issue, and the pull request waits for the design.
+  When the design merges, a maintainer replaces `needs-design` with
+  `accepted`.
 - `wontfix`: a maintainer declined the issue.
