@@ -8,6 +8,9 @@
 #
 # Every call for one request (PushBody, Pick, PullBody, the reports) must
 # reach the same replica: stream_id and response_id are process-local.
+{{- if and (gt (int .Values.replicaCount) 1) (not (dig "leader_election" "enabled" false (.Values.config | default dict))) }}
+{{- fail "replicaCount > 1 needs config.leader_election.enabled=true, or the replicas overwrite each other's CRD status" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,6 +34,10 @@ spec:
         checksum/config: {{ include "kinference.config" . | sha256sum }}
     spec:
       serviceAccountName: {{ include "kinference.fullname" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -43,6 +50,10 @@ spec:
         - name: kinference
           image: {{ include "kinference.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           args: ["--config", "/etc/kinference/config.json"]
           env:
             # The default pins dynamo_kv_router::indexer::radix_tree to error:
@@ -83,6 +94,10 @@ spec:
             - name: config
               mountPath: /etc/kinference
               readOnly: true
+            - name: home
+              mountPath: /home/app
+            - name: tmp
+              mountPath: /tmp
             {{- if or .Values.tokenizers.existingClaim .Values.tokenizers.configMap }}
             - name: tokenizers
               mountPath: /etc/tokenizers
@@ -110,6 +125,10 @@ spec:
         - name: config
           configMap:
             name: {{ include "kinference.fullname" . }}-config
+        - name: home
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
         {{- if .Values.tokenizers.existingClaim }}
         - name: tokenizers
           persistentVolumeClaim:
