@@ -176,3 +176,43 @@ fn provider_path_is_optional() {
 fn serde_yaml_lite(s: &str) -> serde_json::Value {
     serde_json::from_str(s).expect("test fixture is valid JSON")
 }
+
+/// Every plain integer under a CRD's `spec` declares a `maximum`, so the API
+/// server can't admit a value that our types fail to deserialize. One such
+/// object would fail the watch's whole list page.
+#[test]
+fn every_spec_integer_is_bounded() {
+    fn walk(node: &serde_json::Value, path: &str, unbounded: &mut Vec<String>) {
+        match node {
+            serde_json::Value::Object(map) => {
+                if node["type"] == "integer" && node.get("maximum").is_none() {
+                    unbounded.push(path.to_string());
+                }
+                for (k, v) in map {
+                    walk(v, &format!("{path}.{k}"), unbounded);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for v in items {
+                    walk(v, path, unbounded);
+                }
+            }
+            _ => {}
+        }
+    }
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../charts/kinference-crds/templates"
+    );
+    let mut unbounded = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("the CRDs are the source of truth") {
+        let path = entry.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let crd: serde_json::Value = serde_saphyr::from_str(&text).expect("CRD parses");
+        for version in crd["spec"]["versions"].as_array().unwrap() {
+            let spec = &version["schema"]["openAPIV3Schema"]["properties"]["spec"];
+            walk(spec, &path.display().to_string(), &mut unbounded);
+        }
+    }
+    assert!(unbounded.is_empty(), "unbounded integers: {unbounded:#?}");
+}
