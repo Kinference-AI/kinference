@@ -853,7 +853,12 @@ async fn scrape_once(
         waiting: waiting.unwrap_or(0.0).max(0.0) as u32,
         running: running.unwrap_or(0.0).max(0.0) as u32,
         swapped: swapped.unwrap_or(0.0).max(0.0) as u32,
-        kv_cache_usage: kv_cache.unwrap_or(0.0).max(0.0) as f32,
+        // A fraction. An `+Inf` would turn the predictor's `penalty * usage`
+        // into NaN.
+        kv_cache_usage: kv_cache
+            .filter(|v| !v.is_nan())
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0) as f32,
         completions_total,
         // Filled in by the poller.
         completion_rate_per_sec: 0.0,
