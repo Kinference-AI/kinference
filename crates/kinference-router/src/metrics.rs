@@ -291,7 +291,7 @@ pub struct RouterMetrics {
     /// `kinference_policy_revision_mismatch_total`: the gateway routed on a pool
     /// revision we don't hold. Rising means our watch lags the gateway.
     policy_revision_mismatch: IntCounter,
-    /// `kinference_predicted_ttft_ms{worker,model}`: the values `predictedTTFT`
+    /// `kinference_predicted_ttft_ms{model}`: the values `predictedTTFT`
     /// compares against, for every candidate scored (winners alone would be
     /// biased low).
     ///
@@ -392,9 +392,9 @@ impl RouterMetrics {
             registry,
             "kinference_orphaned_reports_total",
             "Final-token reports whose response_id kinference never issued, or whose \
-             labels aged out of the 600s TTL. Their model comes from the request \
-             field rather than the pick, their tenant falls back to the default \
-             bucket, and their qos is reported as `unknown` — so a non-zero value \
+             labels aged out of the observation TTL. Their model and qos are \
+             reported as `unknown` and their tenant falls back to the default \
+             bucket, so a non-zero value \
              means that much of every per-request family is misattributed. \
              Unlabelled: it answers whether attribution is intact, not whose",
         );
@@ -627,14 +627,14 @@ impl RouterMetrics {
             registry,
             "kinference_predicted_ttft_ms",
             "Predicted time-to-first-token in milliseconds, per candidate scored by \
-                 an InferencePolicy, by worker and model. The exact values a \
+                 an InferencePolicy, by model. The exact values a \
                  `drop: {predictedTTFT: ...}` clause compares against — every candidate, \
                  not just the winner. Recorded whether or not a policy is attached",
             vec![
                 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0,
                 40000.0, 80000.0,
             ],
-            &["worker", "model"],
+            &["model"],
         );
         let policy_revision_mismatch = int_counter(
             registry,
@@ -856,10 +856,11 @@ impl RouterMetrics {
         self.policy_rule_matches.with_label_values(&[rule]).inc();
     }
 
-    /// One candidate's predicted TTFT, as scored by a policy.
-    pub fn record_predicted_ttft(&self, worker: &str, model: &str, ms: f64) {
+    /// One candidate's predicted TTFT, as scored by a policy. No worker label:
+    /// workers come and go with pod IPs, and a series is never removed.
+    pub fn record_predicted_ttft(&self, model: &str, ms: f64) {
         self.predicted_ttft_ms
-            .with_label_values(&[worker, model])
+            .with_label_values(&[model])
             .observe(ms);
     }
 
