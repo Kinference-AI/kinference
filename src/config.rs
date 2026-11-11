@@ -77,7 +77,8 @@ pub struct Config {
     pub body_max_request_kb: Option<u64>,
     /// TTL, in seconds, for a buffered body awaiting `Pick` or `PullBody`. This
     /// is what guarantees release when a caller vanishes, since `Abort` is
-    /// best-effort. Defaults to 60.
+    /// best-effort. It also bounds how long a `PullBody` caller may leave a
+    /// chunk unread. Defaults to 60.
     #[serde(default)]
     pub body_ttl_secs: Option<u64>,
     /// Maximum seconds between two `PushBody` chunks before the push fails with

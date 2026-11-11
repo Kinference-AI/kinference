@@ -824,10 +824,15 @@ fn degrade_reason_labels_match_the_enum() {
 #[test]
 fn body_reject_reason_labels_match_the_enum() {
     use crate::body_store::RejectReason as R;
-    let all = [R::DeclaredTooLarge, R::RequestTooLarge, R::ServerFull];
+    let all = [
+        R::DeclaredTooLarge,
+        R::RequestTooLarge,
+        R::ChunkTooLarge,
+        R::ServerFull,
+    ];
     for v in all {
         match v {
-            R::DeclaredTooLarge | R::RequestTooLarge | R::ServerFull => {}
+            R::DeclaredTooLarge | R::RequestTooLarge | R::ChunkTooLarge | R::ServerFull => {}
         }
     }
     let from_enum: Vec<&str> = all.into_iter().map(|r| r.as_label()).collect();

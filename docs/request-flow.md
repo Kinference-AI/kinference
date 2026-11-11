@@ -144,7 +144,9 @@ prediction and the id.
 
 `grpc::pull_body` takes the outbound body for the `response_id` as a lease
 and streams it out. The caller forwards that body upstream in place of the
-body that it sent.
+body that it sent. When the caller leaves a chunk unread for the body TTL,
+`pull_body` ends the stream with `DEADLINE_EXCEEDED` and releases the
+lease.
 
 ### ReportFirstToken
 

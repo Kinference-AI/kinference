@@ -37,6 +37,9 @@ use tonic::Status;
 use crate::metrics::RouterMetrics;
 use crate::proto::BodyChunk;
 
+/// The largest `BodyChunk` payload that the proto allows, in bytes.
+pub(crate) const MAX_CHUNK_BYTES: usize = 1024 * 1024;
+
 /// Reason a push was refused, for the `kinference_body_rejected_total{reason}`
 /// counter. Kept alongside the `Status` so the caller-facing message and the
 /// metric label can't drift apart.
@@ -47,6 +50,8 @@ pub enum RejectReason {
     DeclaredTooLarge,
     /// The bytes actually received exceeded the per-request cap.
     RequestTooLarge,
+    /// One chunk exceeded [`MAX_CHUNK_BYTES`].
+    ChunkTooLarge,
     /// The server-wide budget is full.
     ServerFull,
 }
@@ -56,6 +61,7 @@ impl RejectReason {
         match self {
             RejectReason::DeclaredTooLarge => "declared_too_large",
             RejectReason::RequestTooLarge => "request_too_large",
+            RejectReason::ChunkTooLarge => "chunk_too_large",
             RejectReason::ServerFull => "server_full",
         }
     }
@@ -109,9 +115,10 @@ impl BodyStore {
         }
     }
 
-    /// The per-request budget, for the gRPC decoding limit.
-    pub fn max_request_bytes(&self) -> u64 {
-        self.max_request_bytes
+    /// How long a body may sit unclaimed or unread before kinference releases
+    /// it.
+    pub fn ttl(&self) -> Duration {
+        self.ttl
     }
 
     /// `(entries, bytes_in_use)`, for `/metrics` gauges and tests.
@@ -630,6 +637,17 @@ where
                         received: buf.len() as u64,
                     });
                 }
+            }
+            // tonic refuses a message over the decoding limit with
+            // OUT_OF_RANGE, before buffering it. The proto promises
+            // RESOURCE_EXHAUSTED.
+            Ok(Some(Err(e))) if e.code() == tonic::Code::OutOfRange => {
+                return Err(PushFailure::Budget(
+                    Status::resource_exhausted(format!(
+                        "a body chunk exceeds the limit of {MAX_CHUNK_BYTES} bytes"
+                    )),
+                    RejectReason::ChunkTooLarge,
+                ));
             }
             Ok(Some(Err(e))) => return Err(PushFailure::Transport(e)),
         }

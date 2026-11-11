@@ -4861,7 +4861,7 @@
           "id": 63,
           "type": "timeseries",
           "title": "Body rejections",
-          "description": "`server_full` is a CAPACITY signal needing operator action; `declared_too_large` and `request_too_large` are CLIENT errors needing none. Three different meanings in one family — never alert on their sum.",
+          "description": "`server_full` is a CAPACITY signal needing operator action; `declared_too_large`, `request_too_large` and `chunk_too_large` are CLIENT errors needing none. Different meanings in one family — never alert on their sum.",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
@@ -4932,6 +4932,21 @@
                 "matcher": {
                   "id": "byName",
                   "options": "request_too_large"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#FF9800"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "chunk_too_large"
                 },
                 "properties": [
                   {
