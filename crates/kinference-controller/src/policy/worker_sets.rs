@@ -54,9 +54,9 @@ impl RejectionStore {
 
 /// Resolve every `InferenceWorkerSet` into a `PoolSpec`, or a `Rejection`.
 ///
-/// The result is total: `PoolManager::reconcile` retires every pool absent from
-/// it. It is a `BTreeMap` so replicas build identical fleets regardless of the
-/// order the watch delivered objects in.
+/// The result is total: `PoolManager::reconcile` retires every unpinned pool
+/// absent from it. It is a `BTreeMap` so replicas build identical fleets
+/// regardless of the order the watch delivered objects in.
 pub fn desired_pools(
     sets: &[InferenceWorkerSet],
     profiles: &[ProfileConfig],
