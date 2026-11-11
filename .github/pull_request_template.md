@@ -35,4 +35,6 @@ Validation
 Issues
 
 <!-- Closes #N for each issue the pull request closes, and work that
-the pull request leaves out. -->
+the pull request leaves out. A design pull request says Part of #N
+and closes nothing. The last pull request of a design also says
+Closes #N for the proposal. -->
