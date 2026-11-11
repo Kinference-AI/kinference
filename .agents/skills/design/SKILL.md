@@ -64,8 +64,7 @@ answer. Look every fact up first.
 9. Show the user the path and the Summary, Proposal and Break-down
    sections. Revise until they approve.
 10. Commit only when the user asks: a branch from `origin/main`, one
-    commit with `git commit -s`, no attribution trailer. Never set
-    `status: accepted` here.
+    commit with `git commit -s`. Never set `status: accepted` here.
 
 Done: the committed draft on a branch. After the commit, end with:
 "Run `/pr`. The pull request says `Part of #<N>`. When the review is

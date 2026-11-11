@@ -29,8 +29,8 @@ name itself.
    branch, the skill updates it and ends with `gh pr edit`.
 3. Read the branch: `git log --reverse <base>..HEAD` and
    `git diff --stat <base>...HEAD`. Every commit has a
-   `Signed-off-by` trailer and no attribution trailer. Name the
-   commits that fail, and go on.
+   `Signed-off-by` trailer. Name the commits that lack one, and go
+   on.
 4. Find the issue from the user or from the commit messages. When
    neither names one, say "The branch names no issue. The policy
    closes a pull request without one. Run `/issue`, wait for
