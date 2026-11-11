@@ -1312,14 +1312,18 @@ fn a_refused_provider_reports_the_reason_and_the_fix() {
 
     // A refused provider's status carries nothing beyond its verdict. Checked
     // by key set, so any new field leaking through fails here.
-    let keys: Vec<String> = serde_json::to_value(&s)
+    let keys: std::collections::BTreeSet<String> = serde_json::to_value(&s)
         .unwrap()
         .as_object()
         .unwrap()
         .keys()
         .cloned()
         .collect();
-    assert_eq!(keys, ["conditions", "state"], "unexpected key on a refusal");
+    assert_eq!(
+        keys,
+        ["conditions", "state"].map(String::from).into(),
+        "unexpected key on a refusal"
+    );
 }
 
 #[test]

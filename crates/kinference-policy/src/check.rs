@@ -308,7 +308,11 @@ fn unknown_fields(v: &Value, position: &str, path: &str, out: &mut Vec<Finding>)
     let (Some(known), Value::Object(map)) = (known_keys(position), v) else {
         return;
     };
-    for (k, child) in map {
+    // Sorted, so the findings come out in the same order whether or not a
+    // crate in the build enables serde_json's `preserve_order`.
+    let mut entries: Vec<_> = map.iter().collect();
+    entries.sort_unstable_by_key(|(k, _)| *k);
+    for (k, child) in entries {
         let child_path = format!("{path}.{k}");
         if !known.contains(&k.as_str()) {
             let suggestion = did_you_mean(k, known.iter().copied()).map(str::to_string);

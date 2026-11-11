@@ -17,7 +17,9 @@ tokio-util.workspace = true
 tokio-stream = "0.1"
 futures.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# `preserve_order`, so a rewritten body keeps the client's key order. vLLM's
+# guided decoding emits a JSON schema's properties in that order.
+serde_json = { workspace = true, features = ["preserve_order"] }
 tracing.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 dashmap.workspace = true
