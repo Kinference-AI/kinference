@@ -22,7 +22,7 @@ check-fmt:
 
 [group('check')]
 clippy:
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --locked --all-targets -- -D warnings
 
 [group('check')]
 lint-chart:
@@ -35,7 +35,7 @@ lint: check-fmt clippy lint-chart
 
 [group('test')]
 test-unit:
-    cargo test
+    cargo test --locked
 
 [group('build')]
 image:
