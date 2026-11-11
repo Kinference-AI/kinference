@@ -57,7 +57,8 @@ fn host_port_from_http_url(url: &str) -> Option<String> {
 pub struct WorkerRegistry {
     by_num: DashMap<u64, WorkerEntry>,
     /// `model_name -> {worker_id_num}`. One mutex; updates are rare and
-    /// reads are cheap.
+    /// reads are cheap. A caller that holds it with a `by_num` guard takes it
+    /// first, so the two can't deadlock.
     by_model: Mutex<HashMap<String, HashSet<u64>>>,
     /// Canonical set of model names this fleet serves; see
     /// [`ServedModelsVerdict`]. Pinned by the first non-empty report, and
@@ -214,6 +215,7 @@ impl WorkerRegistry {
         worker_id_num: u64,
         new_models: &[String],
     ) -> ServedModelsVerdict {
+        let mut by_model = lock(&self.by_model);
         let Some(mut entry_ref) = self.by_num.get_mut(&worker_id_num) else {
             // Unregistered between scrape and update.
             return ServedModelsVerdict::Empty;
@@ -260,13 +262,11 @@ impl WorkerRegistry {
         // First scrape: replace the hint with live data.
         if entry.current_models.is_empty()
             && let Some(hint) = entry.model_name_hint.as_deref()
+            && let Some(set) = by_model.get_mut(hint)
         {
-            let mut by_model = lock(&self.by_model);
-            if let Some(set) = by_model.get_mut(hint) {
-                set.remove(&worker_id_num);
-                if set.is_empty() {
-                    by_model.remove(hint);
-                }
+            set.remove(&worker_id_num);
+            if set.is_empty() {
+                by_model.remove(hint);
             }
         }
 
@@ -278,7 +278,6 @@ impl WorkerRegistry {
         let to_add: Vec<String> = new.difference(&old).map(|s| (*s).clone()).collect();
 
         if !to_remove.is_empty() || !to_add.is_empty() {
-            let mut by_model = lock(&self.by_model);
             for m in &to_remove {
                 if let Some(set) = by_model.get_mut(m) {
                     set.remove(&worker_id_num);

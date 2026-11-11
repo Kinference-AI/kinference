@@ -339,3 +339,45 @@ fn canonical_models_cleared_when_registry_becomes_empty() {
     reg.unregister(1);
     assert!(reg.canonical_models.lock().unwrap().is_none());
 }
+
+/// A scrape and a declared-model reset racing on one registry both finish.
+#[test]
+fn concurrent_scrape_and_declared_reset_do_not_deadlock() {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    let reg = Arc::new(WorkerRegistry::new());
+    for n in 0..64 {
+        reg.register(n, entry(n, 16, "a"));
+    }
+    let until = Instant::now() + Duration::from_millis(500);
+    let scraper = {
+        let reg = reg.clone();
+        std::thread::spawn(move || {
+            let one = vec!["a".to_string()];
+            let two = vec!["a".to_string(), "b".to_string()];
+            let mut i = 0u64;
+            while Instant::now() < until {
+                reg.set_served_models(i % 64, if i.is_multiple_of(2) { &two } else { &one });
+                i += 1;
+            }
+        })
+    };
+    let reconciler = {
+        let reg = reg.clone();
+        std::thread::spawn(move || {
+            let declared = vec!["a".to_string()];
+            while Instant::now() < until {
+                reg.reset_declared_models(Some(&declared));
+            }
+        })
+    };
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        scraper.join().unwrap();
+        reconciler.join().unwrap();
+        let _ = done.send(());
+    });
+    finished
+        .recv_timeout(Duration::from_secs(10))
+        .expect("set_served_models and reset_declared_models deadlocked");
+}
