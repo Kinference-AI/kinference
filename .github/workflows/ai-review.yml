@@ -1,0 +1,134 @@
+name: ai-review
+
+# Runs each Rust review skill in .github/ai-review/skills as its own job, then posts one PR comment
+# that lists every report, with each report's details collapsed below.
+#
+# Opt-in per PR: add the `ai-review` label. Later pushes re-run it while the label stays.
+# Lint and unit tests are not reviewed here because ci.yml already runs `just lint` and
+# `just test-unit`.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+
+concurrency:
+  group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  # Pinned to a release at least two weeks old.
+  CLAUDE_CODE_VERSION: 2.1.310
+  # Per check, per run; the CLI stops once a review would spend more.
+  MAX_BUDGET_USD: "5"
+  # `zoltar` (Buoyant's gateway, secret ZOLTAR_TOKEN) or `claude` (Anthropic, secret
+  # ANTHROPIC_API_KEY). Override with the repo variable AI_REVIEW_PROVIDER.
+  PROVIDER: ${{ vars.AI_REVIEW_PROVIDER || 'zoltar' }}
+
+jobs:
+  review:
+    # Fork PRs get no secrets, so only same-repo PRs run. Adding another label doesn't re-run.
+    if: >-
+      contains(github.event.pull_request.labels.*.name, 'ai-review') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'ai-review') &&
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every check runs on Zoltar's `coding` model.
+        check:
+          - security # high reasoning
+          - logic # high reasoning
+          - protocol # high reasoning
+          - best-practices # low reasoning
+          - tests # low reasoning
+          - perf # low reasoning
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Read-only: the review job never writes to the repo or the PR.
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          # The merge base with the PR base needs the full history.
+          fetch-depth: 0
+
+      - run: npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+
+      # The skills live in .github/ai-review because the repo ignores .claude/.
+      - run: mkdir -p ~/.claude/skills && cp -R .github/ai-review/skills/. ~/.claude/skills/
+
+      # The skills read the PR's decisions first, so they don't re-raise settled points.
+      - name: Gather PR context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          OUT: ${{ runner.temp }}/review/pr_context.md
+        run: .github/workflows/ai-review-context.sh
+
+      - name: Run the ${{ matrix.check }} review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ZOLTAR_TOKEN: ${{ secrets.ZOLTAR_TOKEN }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          CHECK: ${{ matrix.check }}
+          CONTEXT: ${{ runner.temp }}/review/pr_context.md
+          OUT: ${{ runner.temp }}/review/${{ matrix.check }}.md
+        run: .github/workflows/ai-review-run.sh
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: ai-review-${{ matrix.check }}
+          path: ${{ runner.temp }}/review/${{ matrix.check }}.md
+          if-no-files-found: ignore
+          retention-days: 7
+
+
+  comment:
+    needs: review
+    # Post even when some checks failed, so the comment shows which ones did not run. A
+    # cancelled run (superseded by a newer push) posts nothing.
+    if: ${{ !cancelled() && needs.review.result != 'skipped' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # The format step copies code snippets from the PR head.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        # No artifacts at all (every check failed) still posts a comment listing them.
+        continue-on-error: true
+        with:
+          pattern: ai-review-*
+          path: reports
+          merge-multiple: true
+
+      - run: npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+
+      # One agent reads every full report and writes the whole comment: summary, table and
+      # short collapsed details. If it fails, the comment falls back to the raw reports.
+      - name: Format the comment
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ZOLTAR_TOKEN: ${{ secrets.ZOLTAR_TOKEN }}
+          REPORTS: reports
+          OUT: reports/comment.md
+        run: .github/workflows/ai-review-format.sh
+
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          script: |
+            const post = require("./.github/workflows/ai-review-comment.js");
+            await post({ github, context, reportsDir: "reports" });
