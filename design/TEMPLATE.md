@@ -57,7 +57,9 @@ and whether a rollback works. Or "None." and why.>
 ## Break-down
 
 <One line per pull request, in the order they land, each one leaving
-main shippable. Each line becomes one issue in the feature form.>
+main shippable: `- <title in the imperative>. Done: <what an operator
+or the gateway observes>.` Each line becomes one feature request,
+filed as a sub-issue of the proposal.>
 
 ## Open questions
 

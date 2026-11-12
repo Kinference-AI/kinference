@@ -150,16 +150,24 @@ should grow with events, not with traffic.
   error's sources too. The alias avoids a clash with each crate's own
   `Error` type.
 
-## Issues
+## Issues, designs and pull requests
 
-- `gh issue create` skips the issue forms. Before filing, read the form
-  under `.github/ISSUE_TEMPLATE` that matches, and write the body with one
-  section per field, in the form's order, headed by the field's label.
-  Apply the form's labels with `--label`.
-
-## Commits and pull requests
+docs/workflow.md describes the path from an issue to a merge. The
+skills under `.agents/skills` follow that path. `.claude/skills` is a
+symlink to `.agents/skills`, so Claude Code loads the same skills as
+the other agent tools. File an issue only through `/issue`, write a
+design only through `/design`, file a design's sub-issues only
+through `/breakdown`, and open or update a pull request only through
+`/pr`. Each skill checks the labels that docs/workflow.md requires
+and stops when a required label is missing.
 
 CONTRIBUTING.md holds every rule for commits, the sign-off, a branch's
-history and pull request descriptions, and says what an agent may do
-without being asked. Read it before you commit, push or open a pull
-request.
+history and pull request descriptions. Read it before you commit, push
+or open a pull request. What an agent may do on its own:
+
+- Allowed: read the repository and GitHub, and commit locally when
+  the user asks.
+- Ask first: push, fold fixups, or rewrite history in any other way.
+- Never without a yes for that one action: any write to GitHub under
+  the user's identity, such as an issue, a comment or a pull request.
+  An agent never applies a label.
