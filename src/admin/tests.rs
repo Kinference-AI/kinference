@@ -28,7 +28,20 @@ async fn status_and_body(
     pools: Arc<PoolRegistry>,
     policy: Option<Arc<kinference_policy::store::PolicyStore>>,
 ) -> (StatusCode, String) {
-    let resp = readyz(State(ReadyzState { pools, policy })).await;
+    status_with_worker_sets(pools, policy, tokio::sync::watch::channel(true).1).await
+}
+
+async fn status_with_worker_sets(
+    pools: Arc<PoolRegistry>,
+    policy: Option<Arc<kinference_policy::store::PolicyStore>>,
+    worker_sets_ready: tokio::sync::watch::Receiver<bool>,
+) -> (StatusCode, String) {
+    let resp = readyz(State(ReadyzState {
+        pools,
+        policy,
+        worker_sets_ready,
+    }))
+    .await;
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 4096)
         .await
@@ -44,6 +57,38 @@ async fn ready_with_no_pools_at_all() {
     let (status, body) = status_and_body(PoolRegistry::new(), None).await;
     assert_eq!(status, StatusCode::OK, "got: {body:?}");
     assert!(body.contains("worker sets: 0"), "got: {body:?}");
+}
+
+#[tokio::test]
+async fn readiness_waits_for_the_initial_worker_set_list_even_when_empty() {
+    let (ready, receiver) = tokio::sync::watch::channel(false);
+    let pools = PoolRegistry::new();
+    let (status, body) = status_with_worker_sets(pools.clone(), None, receiver.clone()).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body.contains("InferenceWorkerSet watch"));
+
+    ready.send_replace(true);
+    let (status, body) = status_with_worker_sets(pools, None, receiver).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("worker sets: 0"));
+}
+
+#[tokio::test]
+async fn policy_and_worker_set_initialization_are_independent_readiness_gates() {
+    for (workers_listed, policy_listed) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let policy = PolicyStore::new();
+        if policy_listed {
+            policy.publish(Arc::new(
+                kinference_policy::resolve::PolicyIndex::listed_empty(),
+            ));
+        }
+        let receiver = tokio::sync::watch::channel(workers_listed).1;
+        let (status, _) =
+            status_with_worker_sets(PoolRegistry::new(), Some(policy), receiver).await;
+        assert_eq!(status == StatusCode::OK, workers_listed && policy_listed);
+    }
 }
 
 /// Cold workers are ready too; the body reports the fleet state.
@@ -1064,6 +1109,7 @@ fn app_with(
     let metrics = Arc::new(kinference_fleet::scrape::MetricsRegistry::new());
     let registry = metrics::registry();
     let state = AppState {
+        worker_sets_ready: tokio::sync::watch::channel(true).1,
         pools: pools.clone(),
         policy: policy.clone(),
         registry: registry.clone(),

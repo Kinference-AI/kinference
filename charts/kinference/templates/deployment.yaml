@@ -88,8 +88,7 @@ spec:
               mountPath: /etc/tokenizers
               readOnly: true
             {{- end }}
-          # Ready means able to serve a Pick, not that any worker exists; it
-          # only fails while policy is on and the CRD watch has not listed.
+          # Readiness waits for enabled watches to initialize, not for workers.
           readinessProbe:
             httpGet:
               path: /readyz

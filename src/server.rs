@@ -60,6 +60,8 @@ pub async fn run() -> Result<()> {
     // for. Provider health exists either way: the feedback RPCs record it
     // and the status writer publishes it.
     let policy_store = cfg.policy.enabled.then(PolicyStore::new);
+    let (worker_sets_ready_tx, worker_sets_ready) =
+        tokio::sync::watch::channel(!cfg.kubernetes.enabled);
     let provider_health = Arc::new(ProviderHealthStore::new());
 
     let kubernetes =
@@ -93,6 +95,7 @@ pub async fn run() -> Result<()> {
             scrape: handles.scrape.clone(),
             store: policy_store.clone(),
             provider_health,
+            worker_sets_ready: worker_sets_ready_tx,
         },
         &registry,
         cancel.clone(),
@@ -106,6 +109,7 @@ pub async fn run() -> Result<()> {
             AdminHandles {
                 pools: handles.pools.clone(),
                 policy: policy_store,
+                worker_sets_ready,
                 registry: registry.clone(),
                 scrape: handles.scrape,
             },

@@ -22,6 +22,7 @@ use kube::api::ResourceExt;
 use kube::runtime::watcher;
 use kube::runtime::{WatchStreamExt, reflector};
 use serde::Deserialize;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::api::ApiServer;
@@ -29,6 +30,8 @@ use crate::sync;
 use kinference_fleet::discovery::{DiscoveryConfig, DiscoveryDefaults, PortRef, PortRefs};
 use kinference_fleet::pool::PoolSpec;
 use kinference_fleet::profile::ProfileConfig;
+
+mod selector;
 
 /// Worker sets that produced no pool, published for the status writer. A
 /// rejected set appears in no `PolicyIndex`, so this is the only way its status
@@ -246,6 +249,18 @@ pub struct KubernetesConfig {
     pub discovery_defaults: DiscoveryDefaults,
 }
 
+impl KubernetesConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.enabled
+            && let Some(selector) = self.selector.as_deref()
+            && !selector::valid(selector)
+        {
+            return Err(format!("invalid kubernetes.selector: {selector:?}"));
+        }
+        Ok(())
+    }
+}
+
 /// Watch `InferenceWorkerSet`s and drive [`kinference_fleet::pool::PoolManager`].
 ///
 /// Owns the manager, so the live map needs no lock; the periodic reap sweep
@@ -263,6 +278,7 @@ pub struct WorkerSetWatcher {
     store: Option<reflector::Store<InferenceWorkerSet>>,
     rejection_store: std::sync::Arc<RejectionStore>,
     prom: std::sync::Arc<crate::metrics::ControllerMetrics>,
+    ready: watch::Sender<bool>,
 }
 
 impl WorkerSetWatcher {
@@ -274,6 +290,7 @@ impl WorkerSetWatcher {
         manager: kinference_fleet::pool::PoolManager,
         rejection_store: std::sync::Arc<RejectionStore>,
         prom: std::sync::Arc<crate::metrics::ControllerMetrics>,
+        ready: watch::Sender<bool>,
     ) -> Self {
         Self {
             namespace: kube_cfg.namespace.clone(),
@@ -285,6 +302,7 @@ impl WorkerSetWatcher {
             store: None,
             rejection_store,
             prom,
+            ready,
         }
     }
 
@@ -363,6 +381,7 @@ impl WorkerSetWatcher {
                         continue;
                     }
                     self.reconcile_from_store();
+                    self.ready.send_if_modified(|ready| !std::mem::replace(ready, true));
                 }
             }
         }

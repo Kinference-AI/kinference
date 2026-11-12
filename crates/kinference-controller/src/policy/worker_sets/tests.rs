@@ -521,6 +521,7 @@ fn watcher_with(
             std::sync::Arc::new(crate::metrics::ControllerMetrics::new(
                 &prometheus::Registry::new(),
             )),
+            tokio::sync::watch::channel(false).0,
         )
         .with_store(store),
         registry,
@@ -537,6 +538,48 @@ impl kinference_fleet::pool::PoolHooks for NoopHooks {
         Ok(())
     }
     fn on_retire(&self, _pool: &std::sync::Arc<kinference_fleet::pool::Pool>) {}
+}
+
+#[tokio::test]
+async fn initial_list_publishes_readiness_after_materializing_worker_sets() {
+    use crate::api::recorded::Recorded;
+
+    for sets in [vec![], vec![iws("infra", "a", full_spec())]] {
+        let expected = sets.len();
+        let (watcher, registry) = watcher_with(&[], vec![profile("h100")]);
+        let mut ready = watcher.ready.subscribe();
+        assert!(!*ready.borrow());
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(watcher.run(Recorded::default().with(sets), cancel.clone()));
+        tokio::time::timeout(Duration::from_secs(2), ready.wait_for(|ready| *ready))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(registry.snapshot().len(), expected);
+        cancel.cancel();
+        task.await.unwrap();
+        assert!(*ready.borrow());
+    }
+}
+
+#[tokio::test]
+async fn initial_list_failure_does_not_publish_readiness() {
+    use crate::api::recorded::Recorded;
+
+    let (watcher, registry) = watcher_with(&[], vec![profile("h100")]);
+    let mut ready = watcher.ready.subscribe();
+    let cancel = CancellationToken::new();
+    let api = Recorded::default().without::<InferenceWorkerSet>();
+    let task = tokio::spawn(watcher.run(api, cancel.clone()));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), ready.changed())
+            .await
+            .is_err()
+    );
+    assert!(!*ready.borrow());
+    assert!(registry.snapshot().is_empty());
+    cancel.cancel();
+    task.await.unwrap();
 }
 
 #[tokio::test]

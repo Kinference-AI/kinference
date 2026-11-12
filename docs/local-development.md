@@ -208,8 +208,10 @@ jq -c '.inflight_overlap_blocks | fromjson' observations.jsonl
   the Service's port names are not the names that the worker set
   declares. `kubectl get endpointslices -l
   kubernetes.io/service-name=dummy-vllm` shows what discovery sees.
-- `/readyz` returns 503: policy is on and the CRD watch has not listed
-  yet, usually because the CRDs chart is not installed.
+- `/readyz` returns 503: an enabled worker-set or policy watch has not
+  completed its initial list. Check the CRDs chart and list/watch RBAC.
+- Startup reports `invalid kubernetes.selector`: fix the label selector
+  in the config before restarting the deployment.
 - `kinference_index_blocks` stays 0: the prompt was shorter than a block;
   or `kvBlockSize` disagrees with the block size that the engine
   publishes, which Kinference logs as a block size mismatch and the

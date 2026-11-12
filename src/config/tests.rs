@@ -370,6 +370,44 @@ fn minimal() -> Config {
     .expect("parses")
 }
 
+#[test]
+fn invalid_kubernetes_selector_fails_at_config_load() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.json");
+    std::fs::write(
+        &path,
+        json!({
+            "listen": "127.0.0.1:50051",
+            "profile": [{"name": "t"}],
+            "kubernetes": {"enabled": true, "selector": "app in ("}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let error = Config::load(path).unwrap_err();
+    assert!(error.to_string().contains("invalid kubernetes.selector"));
+}
+
+#[test]
+fn kubernetes_selectors_accept_equality_sets_and_empty_values() {
+    for selector in ["", "app=router", "app=", "app in (router,worker),!retired"] {
+        let config = parse(json!({
+            "listen": "127.0.0.1:50051",
+            "profile": [{"name": "t"}],
+            "kubernetes": {"enabled": true, "selector": selector}
+        }))
+        .unwrap();
+        config.validate().unwrap();
+    }
+}
+
+#[test]
+fn disabled_kubernetes_ignores_its_unused_selector() {
+    let mut config = minimal();
+    config.kubernetes.selector = Some("app in (".into());
+    config.validate().unwrap();
+}
+
 /// The router's defaults: 256 MiB and 8 MiB in bytes, 60 s, 30 s, 600 s.
 #[test]
 fn router_settings_default() {

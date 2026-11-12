@@ -30,6 +30,7 @@ mod policy_api;
 /// State shared by every route via `FromRef`.
 #[derive(Clone)]
 struct AppState {
+    worker_sets_ready: tokio::sync::watch::Receiver<bool>,
     /// The live pool set, so `/readyz` reports on pools added after startup.
     pools: Arc<PoolRegistry>,
     /// CRD policy, when enabled. `/readyz` gates on it having listed; see
@@ -51,10 +52,10 @@ impl FromRef<AppState> for Arc<PoolRegistry> {
     }
 }
 
-/// What `/readyz` needs: the fleet state to report, and the policy store to
-/// gate on. One extractor because axum allows a handler only one `State`.
+/// The fleet state and initialization gates for `/readyz`.
 #[derive(Clone)]
 struct ReadyzState {
+    worker_sets_ready: tokio::sync::watch::Receiver<bool>,
     pools: Arc<PoolRegistry>,
     policy: Option<Arc<kinference_policy::store::PolicyStore>>,
 }
@@ -62,6 +63,7 @@ struct ReadyzState {
 impl FromRef<AppState> for ReadyzState {
     fn from_ref(state: &AppState) -> Self {
         Self {
+            worker_sets_ready: state.worker_sets_ready.clone(),
             pools: state.pools.clone(),
             policy: state.policy.clone(),
         }
@@ -124,6 +126,7 @@ async fn fallback(uri: axum::http::Uri) -> Response {
 
 /// What the admin routes read, built by the server.
 pub struct AdminHandles {
+    pub worker_sets_ready: tokio::sync::watch::Receiver<bool>,
     pub pools: Arc<PoolRegistry>,
     /// CRD policy, when enabled; `/readyz` gates on it having listed.
     pub policy: Option<Arc<PolicyStore>>,
@@ -147,12 +150,14 @@ pub async fn serve(
     cancel: CancellationToken,
 ) -> std::io::Result<()> {
     let AdminHandles {
+        worker_sets_ready,
         pools,
         policy,
         registry,
         scrape,
     } = handles;
     let state = AppState {
+        worker_sets_ready,
         policy_api: policy_api::PolicyApiState::new(policy.clone(), pools.clone(), scrape.clone()),
         gauges: FleetGauges::new(pools.clone(), scrape, &registry),
         pools,
@@ -185,10 +190,15 @@ async fn metrics(State(st): State<MetricsState>) -> Response {
 /// has a correct answer (`NO_WORKERS`), and a provider-only deployment has no
 /// workers at all.
 ///
-/// The one gate is policy: when enabled but the CRD reflectors haven't
-/// listed, a `Pick` naming an `InferencePool` would route on load alone,
-/// bypassing the policy. Returns 503 until then.
+/// Returns 503 until the enabled worker-set and policy watches initialize.
 async fn readyz(State(st): State<ReadyzState>) -> Response {
+    if !*st.worker_sets_ready.borrow() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the InferenceWorkerSet watch has not completed its initial list\n",
+        )
+            .into_response();
+    }
     if let Some(store) = st.policy.as_ref()
         && !store.snapshot().listed()
     {

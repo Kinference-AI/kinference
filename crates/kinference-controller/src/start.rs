@@ -40,6 +40,7 @@ pub struct ControllerHandles {
     /// `None` when policy is off: no CRD watch, no writers, no election.
     pub store: Option<Arc<PolicyStore>>,
     pub provider_health: Arc<ProviderHealthStore>,
+    pub worker_sets_ready: watch::Sender<bool>,
 }
 
 /// The running control plane. `cancel` stops it; `shutdown` then waits for
@@ -84,6 +85,7 @@ pub async fn start(
         scrape,
         store,
         provider_health,
+        worker_sets_ready,
     } = handles;
     let prom = Arc::new(ControllerMetrics::new(registry));
     let api = if cfg.kubernetes.enabled || store.is_some() {
@@ -106,6 +108,7 @@ pub async fn start(
                 manager,
                 rejections.clone(),
                 prom.clone(),
+                worker_sets_ready,
             );
             let cancel = cancel.clone();
             tokio::spawn(async move { watcher.run(api, cancel).await });

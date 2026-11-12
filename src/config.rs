@@ -300,6 +300,7 @@ impl Config {
 
     /// Validate cross-set invariants.
     fn validate(&self) -> Result<()> {
+        self.kubernetes.validate().map_err(anyhow::Error::msg)?;
         if self.worker_sets.is_empty() && !self.kubernetes.enabled {
             anyhow::bail!(
                 "at least one workerset is required (or set kubernetes.enabled = true \
