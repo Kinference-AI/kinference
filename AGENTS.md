@@ -153,11 +153,13 @@ should grow with events, not with traffic.
 ## Issues, designs and pull requests
 
 docs/workflow.md describes the path from an issue to a merge. The
-skills under `.agents/skills` follow that path. File an issue only
-through `/issue`, write a design only through `/design`, file a
-design's sub-issues only through `/breakdown`, and open or update a
-pull request only through `/pr`. Each skill checks the labels that
-docs/workflow.md requires and stops when a required label is missing.
+skills under `.agents/skills` follow that path. `.claude/skills` is a
+symlink to `.agents/skills`, so Claude Code loads the same skills as
+the other agent tools. File an issue only through `/issue`, write a
+design only through `/design`, file a design's sub-issues only
+through `/breakdown`, and open or update a pull request only through
+`/pr`. Each skill checks the labels that docs/workflow.md requires
+and stops when a required label is missing.
 
 CONTRIBUTING.md holds every rule for commits, the sign-off, a branch's
 history and pull request descriptions. Read it before you commit, push
