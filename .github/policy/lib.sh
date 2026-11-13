@@ -1,5 +1,5 @@
-# Helpers that pr.sh sources. Every write goes through `write`, which
-# POLICY_DRY_RUN=1 turns off.
+# Helpers that pr.sh and issue.sh source. Every write goes through `write`,
+# which POLICY_DRY_RUN=1 turns off.
 
 set -euo pipefail
 

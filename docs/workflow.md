@@ -111,6 +111,11 @@ CONTRIBUTING.md only fails the check. An edit, a push, or a label or
 an assignment on the issue runs the check again. A pull request that
 the check closed opens again once the pull request passes.
 
+An issue check does the same for the issue forms. An issue without
+a form's headings or without text under each required field gets a
+comment, the `invalid` label and a close. An edit that fills the
+form opens the issue again. The same variable turns the closing on.
+
 ## Labels
 
 - `accepted`: a maintainer greenlit an implementation. A proposal

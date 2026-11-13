@@ -1,0 +1,34 @@
+name: issue-policy
+
+# Checks an issue against the issue forms and docs/workflow.md. The
+# repository variable POLICY_ENFORCE=true lets the check close an
+# issue, and POLICY_ISSUE_CAP sets how many untriaged issues a
+# read-only account may hold open.
+on:
+  issues:
+    types: [opened, edited, reopened]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: An issue number, or all
+        required: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number || inputs.issue }}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  policy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - run: .github/policy/issue.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          POLICY_ENFORCE: ${{ vars.POLICY_ENFORCE }}
+          POLICY_ISSUE_CAP: ${{ vars.POLICY_ISSUE_CAP }}
+          ISSUE: ${{ github.event.issue.number || inputs.issue }}
