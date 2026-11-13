@@ -109,6 +109,9 @@ impl DanglingPolicy {
 pub struct Unresolved {
     pub kind: String,
     pub name: String,
+    /// The namespace that the reference points into, which may differ from
+    /// the pool's.
+    pub namespace: String,
     /// UID of the offending object, when it exists. Used as a status cache key;
     /// not published.
     pub uid: Option<String>,
@@ -619,6 +622,7 @@ pub fn resolve(
                     Err(reason) => unresolved.push(Unresolved {
                         kind: "InferenceWorkerSet".into(),
                         name: ws.name_any(),
+                        namespace: ns.clone(),
                         uid: ws.uid(),
                         reason,
                     }),
@@ -636,6 +640,7 @@ pub fn resolve(
                             kind.to_string()
                         },
                         name: dest.name.clone().unwrap_or_default(),
+                        namespace: dest.namespace.clone().unwrap_or_else(|| ns.clone()),
                         uid: None,
                         reason: UnresolvedReason::UnsupportedKind,
                     });
@@ -660,6 +665,7 @@ pub fn resolve(
                     unresolved.push(Unresolved {
                         kind: kind.to_string(),
                         name: label,
+                        namespace: target_ns.to_string(),
                         uid: None,
                         reason: UnresolvedReason::CrossNamespaceNotGranted,
                     });
@@ -692,6 +698,7 @@ pub fn resolve(
                             bind(ws, pools_by_key, rejections).map(ResolvedDestination::Local),
                             "InferenceWorkerSet",
                             &ws.name_any(),
+                            target_ns,
                             ws.uid(),
                         );
                     }
@@ -711,6 +718,7 @@ pub fn resolve(
                             resolve_provider(prov, grants).map(ResolvedDestination::Provider),
                             "InferenceProvider",
                             &prov.name_any(),
+                            target_ns,
                             prov.uid(),
                         );
                     }
@@ -719,6 +727,7 @@ pub fn resolve(
                     unresolved.push(Unresolved {
                         kind: kind.to_string(),
                         name: label,
+                        namespace: target_ns.to_string(),
                         uid: None,
                         reason: UnresolvedReason::NotFound,
                     });
@@ -885,6 +894,7 @@ fn push_destination(
     resolved: Result<ResolvedDestination, UnresolvedReason>,
     kind: &str,
     name: &str,
+    namespace: &str,
     uid: Option<String>,
 ) {
     let reason = match resolved {
@@ -905,6 +915,7 @@ fn push_destination(
     unresolved.push(Unresolved {
         kind: kind.to_string(),
         name: name.to_string(),
+        namespace: namespace.to_string(),
         uid,
         reason,
     });
