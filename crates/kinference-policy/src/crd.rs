@@ -15,10 +15,9 @@
 //! `--validate=false`, or predating a schema change) would fail the whole page.
 //! The router enforces them instead and reports violations in status.
 //!
-//! Status lists don't use `skip_serializing_if = "Vec::is_empty"`: status is
-//! written as a JSON merge patch, where an omitted key is left unchanged, so an
-//! empty list must serialize as `[]` to clear it. Lists nested inside another
-//! array may still skip, since the parent array is replaced wholesale.
+//! Status object fields serialize empty lists as `[]` and absent optional values
+//! as `null`. JSON merge patches leave omitted fields unchanged. Fields nested
+//! inside arrays may still skip, since the parent array is replaced wholesale.
 //!
 //! Each status's `state` is a comma-separated string for a printer column: the
 //! primary verdict, then any qualifiers that apply. It is a string because a
@@ -213,7 +212,7 @@ pub struct ModelAlias {
 #[serde(rename_all = "camelCase")]
 pub struct InferenceWorkerSetStatus {
     /// See the module docs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub state: Option<String>,
     #[serde(default)]
     pub models: Vec<WorkerSetModelStatus>,
@@ -223,9 +222,9 @@ pub struct InferenceWorkerSetStatus {
     /// here. It means no pool-scoped policy applies.
     #[serde(default)]
     pub referenced_by: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub endpoints: Option<EndpointCounts>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub kv_events: Option<KvEventsStatus>,
     #[serde(default)]
     pub conditions: Vec<Condition>,
@@ -237,10 +236,10 @@ pub struct InferenceWorkerSetStatus {
 #[serde(rename_all = "camelCase")]
 pub struct KvEventsStatus {
     /// Mirrors `spec.kvEvents` being set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub configured: Option<bool>,
     /// Endpoints kinference has received KV events from.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub subscribed_endpoints: Option<i64>,
 }
 
@@ -274,7 +273,7 @@ pub struct ContextWindow {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema)]
 pub struct EndpointCounts {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub ready: Option<i64>,
 }
 
@@ -380,7 +379,7 @@ pub struct ProviderModel {
 #[serde(rename_all = "camelCase")]
 pub struct InferenceProviderStatus {
     /// See the module docs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub state: Option<String>,
     #[serde(default)]
     pub conditions: Vec<Condition>,
@@ -501,9 +500,9 @@ pub struct PolicyRef {
 #[serde(rename_all = "camelCase")]
 pub struct InferencePoolStatus {
     /// See the module docs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub destination_count: Option<i64>,
     /// The pool's own admission state, as distinct from the per-parent
     /// handshake in `parents[].conditions`. A pool with no `HTTPRoute` has no
@@ -930,7 +929,7 @@ impl BackendRef {
 pub struct InferencePolicyStatus {
     /// `InForce` or `NotReferenced`, then `HasWarnings` if there are any. See
     /// the module docs. Warnings don't affect the `Accepted` condition.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub state: Option<String>,
     /// Pools whose `policyRef` names this policy. Empty means nothing routes
     /// through it.

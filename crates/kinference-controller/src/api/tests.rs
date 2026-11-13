@@ -90,6 +90,68 @@ async fn an_absent_kind_lists_as_404() {
 }
 
 #[tokio::test]
+async fn status_merge_patches_preserve_omitted_fields_and_remove_nulls() {
+    use kinference_policy::crd::InferenceWorkerSet;
+
+    let mut worker_set = InferenceWorkerSet::new("workers", Default::default());
+    worker_set.metadata.namespace = Some("infra".into());
+    worker_set.status = Some(
+        serde_json::from_value(serde_json::json!({
+            "state": "Bound",
+            "endpoints": {"ready": 2},
+            "kvEvents": {"configured": true, "subscribedEndpoints": 2},
+            "models": [{"upstreamName": "old"}]
+        }))
+        .unwrap(),
+    );
+    let api = Recorded::default().with([worker_set.clone()]);
+    let patch = serde_json::json!({
+        "state": "NotReady",
+        "kvEvents": {"configured": null},
+        "models": []
+    });
+
+    api.patch_status::<InferenceWorkerSet>("infra", "workers", &patch)
+        .await
+        .unwrap();
+
+    let patched: InferenceWorkerSet = api.object("infra", "workers").unwrap();
+    let status = patched.status.unwrap();
+    assert_eq!(status.state.as_deref(), Some("NotReady"));
+    assert_eq!(status.endpoints.unwrap().ready, Some(2));
+    let kv_events = status.kv_events.unwrap();
+    assert_eq!(kv_events.configured, None);
+    assert_eq!(kv_events.subscribed_endpoints, Some(2));
+    assert!(status.models.is_empty());
+    assert_eq!(
+        serde_json::to_value(&patched.spec).unwrap(),
+        serde_json::to_value(&worker_set.spec).unwrap()
+    );
+    assert_eq!(patched.metadata.resource_version.as_deref(), Some("2"));
+    assert_eq!(
+        api.writes(),
+        vec![Write::PatchStatus {
+            key: key::<InferenceWorkerSet>("infra", "workers"),
+            status: patch,
+        }]
+    );
+
+    api.patch_status::<InferenceWorkerSet>(
+        "infra",
+        "workers",
+        &serde_json::json!({"kvEvents": null}),
+    )
+    .await
+    .unwrap();
+
+    let cleared: InferenceWorkerSet = api.object("infra", "workers").unwrap();
+    let status = cleared.status.unwrap();
+    assert!(status.kv_events.is_none());
+    assert_eq!(status.endpoints.unwrap().ready, Some(2));
+    assert_eq!(status.state.as_deref(), Some("NotReady"));
+}
+
+#[tokio::test]
 async fn a_watch_lists_the_recording_and_stays_open() {
     use futures::StreamExt as _;
     use kube::runtime::watcher::{self, Config, Event};

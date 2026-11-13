@@ -291,8 +291,7 @@ impl ApiServer for Recorded {
         Ok(())
     }
 
-    /// Replaces `status` wholesale, which is what a merge patch of a
-    /// complete status does.
+    /// Merge-patches `status`, retaining omitted fields and removing nulls.
     async fn patch_status<K: Object>(
         &self,
         namespace: &str,
@@ -306,7 +305,7 @@ impl ApiServer for Recorded {
             return Err(not_found(&key));
         };
         let mut value = current.clone();
-        value["status"] = status.clone();
+        json_patch::merge(&mut value, &serde_json::json!({"status": status}));
         inner.writes.push(Write::PatchStatus {
             key: key.clone(),
             status: status.clone(),

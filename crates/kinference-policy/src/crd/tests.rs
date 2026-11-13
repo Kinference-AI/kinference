@@ -1,5 +1,35 @@
 use super::*;
 
+#[test]
+fn absent_status_fields_serialize_as_null_for_merge_patches() {
+    fn assert_null_fields(status: impl serde::Serialize, fields: &[&str]) {
+        let json = serde_json::to_value(status).unwrap();
+        for field in fields {
+            assert_eq!(
+                json.get(*field),
+                Some(&serde_json::Value::Null),
+                "{field} must serialize as null to remove its previous value"
+            );
+        }
+    }
+
+    assert_null_fields(
+        InferenceWorkerSetStatus::default(),
+        &["state", "endpoints", "kvEvents"],
+    );
+    assert_null_fields(
+        KvEventsStatus::default(),
+        &["configured", "subscribedEndpoints"],
+    );
+    assert_null_fields(EndpointCounts::default(), &["ready"]);
+    assert_null_fields(
+        InferencePoolStatus::default(),
+        &["state", "destinationCount"],
+    );
+    assert_null_fields(InferenceProviderStatus::default(), &["state"]);
+    assert_null_fields(InferencePolicyStatus::default(), &["state"]);
+}
+
 /// The YAML in `charts/kinference-crds/templates/` is the contract; these check
 /// that our types deserialize its examples.
 #[test]

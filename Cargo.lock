@@ -1837,6 +1837,7 @@ dependencies = [
  "chrono",
  "futures",
  "getrandom 0.2.17",
+ "json-patch",
  "k8s-openapi",
  "kinference-fleet",
  "kinference-policy",

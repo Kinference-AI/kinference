@@ -762,6 +762,58 @@ async fn a_listed_snapshot_patches_every_object_it_describes() {
 }
 
 #[tokio::test]
+async fn a_worker_set_clears_kv_events_when_rejected_and_restores_them_on_recovery() {
+    let (api, _) = recorded_cluster();
+    let ((writer, _tx), _) = writer_over(api.clone(), true);
+    let worker_set: InferenceWorkerSet = api.object("infra", "workers-h100").unwrap();
+    let mut destination = dest("workers-h100", &[]);
+    destination.kv_events_declared = true;
+    let stats = facts(2, &[("m", 2, None, None)]);
+    let referenced_by = vec!["infra/chat".into()];
+    let bound = desired_worker_set_status(&destination, &stats, &referenced_by, None, None);
+    let rejected = rejected_worker_set_status(
+        &kinference_policy::rejection::RejectReason::MissingKvBlockSize,
+        &referenced_by,
+        Some(&bound),
+    );
+    let recovered =
+        desired_worker_set_status(&destination, &stats, &referenced_by, None, Some(&rejected));
+
+    for (desired, has_kv_events) in [(&bound, true), (&rejected, false), (&recovered, true)] {
+        writer
+            .patch::<InferenceWorkerSet>(
+                "InferenceWorkerSet",
+                "infra",
+                "workers-h100",
+                worker_set.metadata.uid.as_deref(),
+                desired,
+            )
+            .await;
+
+        let patched: InferenceWorkerSet = api.object("infra", "workers-h100").unwrap();
+        let status = patched.status.unwrap();
+        assert_eq!(status.kv_events.is_some(), has_kv_events);
+        assert_eq!(
+            status.endpoints.unwrap().ready,
+            desired.endpoints.unwrap().ready
+        );
+        assert_eq!(status.models.len(), desired.models.len());
+
+        let writes = api.writes();
+        writer
+            .patch::<InferenceWorkerSet>(
+                "InferenceWorkerSet",
+                "infra",
+                "workers-h100",
+                worker_set.metadata.uid.as_deref(),
+                desired,
+            )
+            .await;
+        assert_eq!(api.writes(), writes);
+    }
+}
+
+#[tokio::test]
 async fn an_unchanged_snapshot_issues_no_second_patch() {
     let (api, index) = recorded_cluster();
     let ((w, _tx), _) = writer_over(api.clone(), true);
