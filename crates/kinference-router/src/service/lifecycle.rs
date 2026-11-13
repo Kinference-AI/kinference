@@ -87,11 +87,11 @@ struct Scored {
     body: WireBody,
     facts: BodyFacts,
     groups: Vec<ScoredGroup>,
-    /// Why the first pool's pick lost its prefix signal, for the outcome.
-    degraded: Option<String>,
     /// The inputs again, for the policy to score more groups. `None` when
     /// nothing could need them.
     spare: Option<ScoreInput>,
+    /// The policy snapshot, when the request names a pool and policy is on.
+    snapshot: Option<Arc<kinference_policy::resolve::PolicyIndex>>,
 }
 
 /// Step 4. What `commit` applies.
@@ -312,7 +312,10 @@ impl KinferenceService {
         let inputs = ScoreInput {
             input: Input::Messages(messages),
             chat_extras,
-            raw_body: Some(body.bytes(req.body).to_vec()),
+            raw_body: Some(RawBody {
+                bytes: body.bytes(req.body).to_vec(),
+                model: model.clone(),
+            }),
         };
         Ok(Resolved {
             model,
@@ -324,9 +327,12 @@ impl KinferenceService {
         })
     }
 
-    /// Step 3. Score the first serving pool, then the rest with the first's
-    /// tokens. Records `score_degraded`. Never refuses: a pool with no ready
-    /// worker yields no group, and a policy may still place the request.
+    /// Step 3. Score every pool that serves the model, rendering it once.
+    /// Records `score_degraded`. Never refuses: a pool with no ready worker
+    /// yields no group, and a policy may still place the request.
+    ///
+    /// Under a policy that resolves the named pool, scores nothing. The
+    /// policy renders every model that it could use in one round.
     async fn score_groups(&self, req: &PickRequest<'_>, resolved: Resolved) -> Scored {
         let Resolved {
             model,
@@ -337,75 +343,68 @@ impl KinferenceService {
             inputs,
         } = resolved;
 
-        // Scoring consumes the inputs, but a second pool or a policy may need
-        // them again; only clone in that case.
-        let spare = (self.policy_for(req).is_some() || serving.len() > 1).then(|| inputs.clone());
-        let mut degraded: Option<String> = None;
-        let mut groups: Vec<ScoredGroup> = Vec::new();
-        if let Some(first) = serving.first() {
-            let (outcome, score_side) = self
-                .scoring
-                .score_workers(&*self.tokenizer, first, &model, inputs, HashMap::new())
-                .await;
-            match outcome {
-                ScoreOutcome::Ok(resp) => groups.push(ScoredGroup {
-                    pool: first.clone(),
-                    model: model.clone(),
-                    scores: resp.scores,
-                    side: score_side,
-                }),
-                ScoreOutcome::Unavailable(resp, why) => {
-                    self.prom.record_score_degraded(why.as_label());
-                    degraded = Some(why.reason().to_string());
-                    groups.push(ScoredGroup {
-                        pool: first.clone(),
-                        model: model.clone(),
-                        scores: resp.scores,
-                        side: score_side,
-                    });
-                }
-                // Not fatal: another pool or a provider may serve the model.
-                ScoreOutcome::NoWorkers => {}
-            }
+        // Taken once, so the policy runs on the snapshot that decided this.
+        let snapshot = self.policy_for(req).map(|(_, store)| store.snapshot());
+        let policy_resolves = match (&snapshot, req.pool_ref) {
+            (Some(s), Some(p)) => s.lookup(&p.namespace, &p.name).is_some(),
+            _ => false,
+        };
+        if policy_resolves {
+            return Scored {
+                model,
+                requested_model,
+                body,
+                facts,
+                groups: Vec::new(),
+                spare: Some(inputs),
+                snapshot,
+            };
         }
 
-        // The remaining pools serving this model, reusing the first group's
-        // tokens.
-        if serving.len() > 1 {
-            let reuse = groups
-                .first()
-                .map(|g| g.side.tokens.clone())
-                .filter(|t| !t.is_empty());
-            for pool in &serving[1..] {
-                let Some(spare) = spare.as_ref() else {
-                    continue;
+        // Scoring consumes the inputs, but a second pool or a policy may need
+        // them again; only clone in that case.
+        let spare = (snapshot.is_some() || serving.len() > 1).then(|| inputs.clone());
+        let mut inputs = Some(inputs);
+        // The model's tokens once a pool has rendered them, for the other
+        // pools. After a failed render, the rest score on load alone.
+        let mut tokens: Option<Vec<u32>> = None;
+        let mut render_failed = false;
+        let mut groups: Vec<ScoredGroup> = Vec::new();
+        for pool in &serving {
+            let (outcome, side) = if let Some(t) = &tokens {
+                self.scoring
+                    .score_workers(
+                        &*self.tokenizer,
+                        pool,
+                        &model,
+                        ScoreInput::tokens(t.clone()),
+                        HashMap::new(),
+                    )
+                    .await
+            } else if render_failed {
+                (
+                    self.scoring.score_load_only(pool, &model),
+                    ScoreSideData::default(),
+                )
+            } else {
+                let Some(input) = inputs.take().or_else(|| spare.clone()) else {
+                    break;
                 };
-                let input = match reuse.clone() {
-                    Some(t) => ScoreInput::tokens(t),
-                    None => spare.clone(),
-                };
-                let (outcome, side) = self
-                    .scoring
+                self.scoring
                     .score_workers(&*self.tokenizer, pool, &model, input, HashMap::new())
-                    .await;
-                let scores = match outcome {
-                    ScoreOutcome::Ok(r) => r.scores,
-                    ScoreOutcome::Unavailable(r, why) => {
-                        self.prom.record_score_degraded(why.as_label());
-                        r.scores
-                    }
-                    ScoreOutcome::NoWorkers => continue,
-                };
-                if scores.is_empty() {
-                    continue;
-                }
-                groups.push(ScoredGroup {
-                    pool: pool.clone(),
-                    model: model.clone(),
-                    scores,
-                    side,
-                });
+                    .await
+            };
+            render_failed |= matches!(outcome, ScoreOutcome::Unavailable(_, Degraded::Tokenize));
+            if !side.tokens.is_empty() {
+                tokens = Some(side.tokens.clone());
             }
+            groups.extend(ScoredGroup::from_outcome(
+                pool.clone(),
+                model.clone(),
+                outcome,
+                side,
+                &self.prom,
+            ));
         }
         Scored {
             model,
@@ -413,8 +412,8 @@ impl KinferenceService {
             body,
             facts,
             groups,
-            degraded,
             spare,
+            snapshot,
         }
     }
 
@@ -433,8 +432,8 @@ impl KinferenceService {
             mut body,
             facts,
             groups,
-            degraded,
             spare,
+            snapshot,
         } = scored;
         let streaming = facts.streaming;
 
@@ -447,22 +446,22 @@ impl KinferenceService {
         // Recording in both would double-count. A request naming an unresolved
         // pool records none, but is counted under
         // `kinference_policy_decisions_total`.
-        let policy = self.policy_for(req);
+        let policy = req.pool_ref.zip(snapshot);
         let winner = best_group(groups, policy.is_none().then_some(&*self.prom));
 
         // No pool named, or policy disabled: the ranking decided, and providers
         // are unreachable.
-        let Some((pref, store)) = policy else {
+        let Some((pref, snapshot)) = policy else {
             let Some(group) = winner else {
                 tracing::debug!("no ready worker serves the model");
                 return Err(PickAndRecordOutcome::NoWorkers { model });
             };
             return Ok(Selected::Local {
+                degraded: group.degraded.map(|d| d.reason().to_string()),
                 group,
                 endpoint: None,
                 body,
                 streaming,
-                degraded,
             });
         };
 
@@ -478,14 +477,8 @@ impl KinferenceService {
                 names
             },
             requested_model,
-            // Block-granular, from scoring. `None` when nothing local was
-            // scored, so `inputTokens` predicates and context-window fitting
-            // don't apply.
-            input_tokens: winner.as_ref().and_then(|w| {
-                w.scores
-                    .first()
-                    .map(|s| (s.total_blocks as i64) * (w.pool.block_size as i64))
-            }),
+            // Set by the policy from its renders, when a predicate needs it.
+            input_tokens: None,
             max_tokens: facts.max_tokens,
             qos: Some(req.qos.as_label().to_string()),
             tenant: req.identity.tenant.clone(),
@@ -495,7 +488,7 @@ impl KinferenceService {
         // Re-bind to the winning group, whose pool's scores and prefix hashes
         // the critical section uses.
         let (group, endpoint) = match self
-            .policy_select(pref, store, winner, &model, spare, attrs)
+            .policy_select(pref, &snapshot, winner, &model, spare, attrs)
             .await
         {
             // An off-cluster destination: nothing pool-scoped applies. Rewrite
@@ -556,11 +549,11 @@ impl KinferenceService {
             );
         }
         Ok(Selected::Local {
+            degraded: group.degraded.map(|d| d.reason().to_string()),
             group,
             endpoint,
             body,
             streaming,
-            degraded,
         })
     }
 
@@ -606,6 +599,7 @@ impl KinferenceService {
             model,
             scores,
             side: score_side,
+            ..
         } = group;
 
         // Derived AFTER the policy may have re-bound `pool`.

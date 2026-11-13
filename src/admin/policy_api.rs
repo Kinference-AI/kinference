@@ -828,6 +828,7 @@ fn build_candidate(
     ready_endpoints: Option<i64>,
     labels: Arc<BTreeMap<String, String>>,
     pool_id: PoolId,
+    input_tokens: Option<i64>,
 ) -> Candidate {
     let upstream = o
         .upstream_model
@@ -871,6 +872,9 @@ fn build_candidate(
         target,
         attrs: CandidateAttrs {
             context_window: o.context_window,
+            // The simulated request's count, as if this candidate's render
+            // agreed with it. Providers skip the fit check.
+            input_tokens: if is_local { input_tokens } else { None },
             // Written from the same `ttft` the target got, never separately.
             predicted_ttft_ms: if is_local { ttft } else { None },
             prefix_cache_hit_ratio: if is_local { hit_ratio } else { None },
@@ -1222,7 +1226,10 @@ fn run_simulation(st: &PolicyApiState, snap: &PolicyIndex, req: &SimRequest) -> 
                 .and_then(|p| p.backend(&o.backend_name))
                 .map(|d| Arc::new(d.labels().clone()))
                 .unwrap_or_default();
-            (build_candidate(o, &p, ready, labels, sim_pool_id), p)
+            (
+                build_candidate(o, &p, ready, labels, sim_pool_id, req.input_tokens),
+                p,
+            )
         })
         .collect();
     let candidates: Vec<Candidate> = built.iter().map(|(c, _)| c.clone()).collect();

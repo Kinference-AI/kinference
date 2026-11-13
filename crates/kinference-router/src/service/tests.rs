@@ -28,6 +28,8 @@ fn group(pool: Arc<Pool>, scores: Vec<WorkerScore>) -> ScoredGroup {
             hashes_by_block_size: HashMap::new(),
             tokens: Vec::new(),
         },
+        input_tokens: None,
+        degraded: None,
     }
 }
 
@@ -402,6 +404,8 @@ fn primary(pool: &Arc<Pool>, model: &str, workers: &[(&str, u32)]) -> ScoredGrou
             hashes_by_block_size: HashMap::new(),
             tokens: Vec::new(),
         },
+        input_tokens: None,
+        degraded: None,
     }
 }
 
@@ -419,14 +423,17 @@ async fn select(
     let spare = Some(ScoreInput {
         input: Input::Messages(vec![serde_json::json!({"role": "user", "content": "hi"})]),
         chat_extras: ChatExtras::default(),
-        raw_body: Some(b"{}".to_vec()),
+        raw_body: Some(RawBody {
+            bytes: b"{}".to_vec(),
+            model: "qwen".into(),
+        }),
     });
     let attrs = kinference_policy::predicate::RequestAttrs {
         model: vec![model.into()],
         requested_model: model.into(),
         ..Default::default()
     };
-    svc.policy_select(&pref, store, Some(start), model, spare, attrs)
+    svc.policy_select(&pref, &store.snapshot(), Some(start), model, spare, attrs)
         .await
 }
 
@@ -516,7 +523,10 @@ async fn select_aliased(
     let spare = Some(ScoreInput {
         input: Input::Messages(vec![serde_json::json!({"role": "user", "content": "hi"})]),
         chat_extras: ChatExtras::default(),
-        raw_body: Some(b"{}".to_vec()),
+        raw_body: Some(RawBody {
+            bytes: b"{}".to_vec(),
+            model: "qwen".into(),
+        }),
     });
     let attrs = kinference_policy::predicate::RequestAttrs {
         model: names,
@@ -525,7 +535,14 @@ async fn select_aliased(
     };
     let out = t
         .svc
-        .policy_select(&pref, t.store(), Some(start), "qwen", spare, attrs)
+        .policy_select(
+            &pref,
+            &t.store().snapshot(),
+            Some(start),
+            "qwen",
+            spare,
+            attrs,
+        )
         .await;
     (t, out)
 }
@@ -588,7 +605,7 @@ async fn dropping_an_alias_drops_a_provider_model_under_every_name() {
         .svc
         .policy_select(
             &TestService::pool_ref(),
-            t.store(),
+            &t.store().snapshot(),
             Some(start),
             "qwen",
             None,
@@ -945,7 +962,7 @@ async fn a_malformed_body_is_a_bad_request() {
 }
 
 /// A policy that rejects the request leaves no state behind, though a worker
-/// was available and scored.
+/// was available, and renders nothing when no rule can match.
 #[tokio::test]
 async fn a_policy_rejection_leaves_no_state() {
     let t = ServiceBuilder::new()
@@ -962,8 +979,7 @@ async fn a_policy_rejection_leaves_no_state() {
     };
     assert_eq!(reason, "no rule matched and unmatched=Reject");
     assert_eq!(model, "qwen");
-    // Scoring precedes the policy, so the worker was tokenized against.
-    assert_eq!(t.render_calls(), 1);
+    assert_eq!(t.render_calls(), 0);
     assert_eq!(t.svc.observations.pending.len(), 0);
     assert_eq!(t.pools[0].inflight.get("10.0.0.1:8000"), 0);
 
@@ -1170,6 +1186,11 @@ async fn a_named_pool_the_snapshot_lacks_fails_open() {
         .pick(BODY, 1, Qos::Interactive, Some(&TestService::pool_ref()))
         .await;
     assert!(matches!(out, PickAndRecordOutcome::Ok { .. }), "{out:?}");
+    assert_eq!(
+        t.render_calls(),
+        1,
+        "the requested model, as without a policy"
+    );
     let out = t.metrics();
     assert!(out.contains(r#"kinference_policy_decisions_total{outcome="unknown_pool"} 1"#));
     assert!(out.contains(
@@ -1271,4 +1292,313 @@ async fn start_builds_from_empty_handles() {
             .expect("a service");
     assert!(service.policy.is_none());
     let _server = crate::grpc::server(service);
+}
+
+/// Four worker sets that all declare the alias `coding`, over three upstream
+/// models: `glm-ws` serves `glm-up`, `qwen-ws` and `qwen-ws-2` both serve
+/// `qwen-up`, and `llama-ws` serves `llama-up`. The policy has no rules, so
+/// every request takes the unmatched route, which considers every set. Each
+/// render takes 50ms.
+async fn three_model_fleet() -> TestService {
+    let sets = [
+        ("glm-ws", "glm-up", "10.0.0.1:8000"),
+        ("qwen-ws", "qwen-up", "10.0.0.2:8000"),
+        ("qwen-ws-2", "qwen-up", "10.0.0.3:8000"),
+        ("llama-ws", "llama-up", "10.0.0.4:8000"),
+    ];
+    let mut b = ServiceBuilder::new().render(Render::Delayed(
+        (1..=32).collect(),
+        Duration::from_millis(50),
+    ));
+    for (set, upstream, addr) in sets {
+        b = b
+            .pool(set, upstream, &[addr])
+            .alias(set, upstream, &["coding"]);
+    }
+    b.policy(serde_json::json!({"rules": []})).build().await
+}
+
+/// The models that the fake `/render` was asked to render, sorted.
+fn rendered_models(t: &TestService) -> Vec<String> {
+    let mut models: Vec<String> = t
+        .render_requests()
+        .iter()
+        .map(|r| model_in(&r.body))
+        .collect();
+    models.sort();
+    models
+}
+
+/// When a policy scores a body against a model other than the one
+/// that the body names, `/render` gets the body naming the model scored
+/// there, since the render endpoint refuses a model that it does not serve.
+#[tokio::test]
+async fn an_openai_body_is_rendered_under_each_model_scored() {
+    let t = shared_alias_fleet("glm-ws").await;
+    let (endpoint, sent) = pick_by_name(&t, "coding").await;
+    assert_eq!(endpoint, "10.0.0.2:8000");
+    assert_eq!(sent, "qwen-up");
+
+    let mut rendered: Vec<String> = t
+        .render_requests()
+        .iter()
+        .map(|r| {
+            assert_eq!(r.path, "/v1/chat/completions/render");
+            model_in(&r.body)
+        })
+        .collect();
+    // Concurrent, so in no particular order.
+    rendered.sort();
+    assert_eq!(rendered, ["glm-up", "qwen-up"]);
+}
+
+/// The router renders the body once per upstream model that the policy
+/// considers, all at once: `glm-up`, `qwen-up` and `llama-up` render in one
+/// round. `qwen-ws-2` scores from `qwen-up`'s tokens.
+#[tokio::test]
+async fn an_openai_body_renders_each_candidate_model_once_and_at_once() {
+    let t = three_model_fleet().await;
+    let body = br#"{"model":"coding","messages":[{"role":"user","content":"hi"}]}"#;
+
+    let out = t
+        .pick(body, 1, Qos::Interactive, Some(&TestService::pool_ref()))
+        .await;
+    assert!(matches!(out, PickAndRecordOutcome::Ok { .. }), "{out:?}");
+    assert_eq!(rendered_models(&t), ["glm-up", "llama-up", "qwen-up"]);
+    assert_eq!(t.render_peak_concurrency(), 3);
+    assert!(nonzero(&t.metrics(), "kinference_score_degraded_total").is_empty());
+}
+
+const CODING: &[u8] = br#"{"model":"coding","messages":[{"role":"user","content":"hi"}]}"#;
+
+/// `glm-ws` serving `glm-up` at worker 1 and `qwen-ws` serving `qwen-up` at
+/// worker 2, both declaring `coding`, under `policy`.
+async fn coding_fleet(render: Render, policy: serde_json::Value) -> TestService {
+    ServiceBuilder::new()
+        .render(render)
+        .pool("glm-ws", "glm-up", &["10.0.0.1:8000"])
+        .alias("glm-ws", "glm-up", &["coding"])
+        .pool("qwen-ws", "qwen-up", &["10.0.0.2:8000"])
+        .alias("qwen-ws", "qwen-up", &["coding"])
+        .policy(policy)
+        .build()
+        .await
+}
+
+/// Whether the router sent one request to worker set `set`.
+fn routed_locally_to(t: &TestService, set: &str) -> bool {
+    t.metrics().contains(&format!(
+        r#"kinference_routed_requests_total{{destination="{set}",tenant="default",type="Local"}} 1"#
+    ))
+}
+
+/// Gives worker `id` a queue deep enough to lose on predicted wait.
+fn make_busy(t: &TestService, id: u64) {
+    t.svc.scoring.scrape.record_sample_for_test(
+        id,
+        kinference_fleet::scrape::MetricsSample {
+            waiting: 60,
+            scraped_at: Some(Instant::now()),
+            ..Default::default()
+        },
+    );
+}
+
+/// Gives worker `id` a context window of `len` tokens for `model`.
+fn set_context_window(t: &TestService, id: u64, model: &str, len: u32) {
+    t.svc.scoring.scrape.record_models_for_test(
+        id,
+        kinference_fleet::scrape::ModelsInfo {
+            models: vec![kinference_fleet::scrape::ModelEntry {
+                name: model.into(),
+                max_model_len: Some(len),
+            }],
+        },
+    );
+}
+
+/// An `inputTokens` rule costs no extra round: the router renders every
+/// model that a rule could use at once, then matches on the count.
+#[tokio::test]
+async fn an_input_tokens_rule_matches_after_one_round_of_renders() {
+    let policy = serde_json::json!({"rules": [
+        {"name": "long", "matches": [{"inputTokens": {"greaterThan": 20}}],
+         "route": {"consider": [{"models": {"names": ["glm-up"]}}],
+                   "select": [{"minimize": "PredictedTTFT"}]}},
+        {"name": "short",
+         "route": {"consider": [{"models": {"names": ["qwen-up"]}}],
+                   "select": [{"minimize": "PredictedTTFT"}]}}
+    ]});
+    for (tokens, expected) in [(32, "glm-ws"), (8, "qwen-ws")] {
+        let render = Render::Delayed((1..=tokens).collect(), Duration::from_millis(50));
+        let t = coding_fleet(render, policy.clone()).await;
+        let out = t
+            .pick(CODING, 1, Qos::Interactive, Some(&TestService::pool_ref()))
+            .await;
+        assert!(matches!(out, PickAndRecordOutcome::Ok { .. }), "{out:?}");
+        assert!(routed_locally_to(&t, expected), "{tokens} tokens");
+        assert_eq!(rendered_models(&t), ["glm-up", "qwen-up"]);
+        assert_eq!(t.render_peak_concurrency(), 2);
+    }
+}
+
+/// A model whose render fails costs at most three attempts and is never
+/// rendered again in the pick. Its pools still compete on load alone.
+#[tokio::test]
+async fn a_failed_render_scores_that_model_on_load_alone() {
+    let render = Render::PerModel(
+        [
+            ("glm-up".to_string(), None),
+            ("qwen-up".to_string(), Some((1..=32).collect())),
+        ]
+        .into(),
+    );
+    let t = ServiceBuilder::new()
+        .render(render)
+        .pool(
+            "glm-ws",
+            "glm-up",
+            &[
+                "10.0.0.1:8000",
+                "10.0.0.2:8000",
+                "10.0.0.3:8000",
+                "10.0.0.4:8000",
+            ],
+        )
+        .alias("glm-ws", "glm-up", &["coding"])
+        .pool("glm-ws-2", "glm-up", &["10.0.0.5:8000"])
+        .alias("glm-ws-2", "glm-up", &["coding"])
+        .pool("qwen-ws", "qwen-up", &["10.0.0.6:8000"])
+        .alias("qwen-ws", "qwen-up", &["coding"])
+        .policy(serde_json::json!({"rules": []}))
+        .build()
+        .await;
+    make_busy(&t, 6);
+
+    let out = t
+        .pick(CODING, 1, Qos::Interactive, Some(&TestService::pool_ref()))
+        .await;
+    let PickAndRecordOutcome::Degraded { model, .. } = &out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(model, "glm-up", "the busy qwen-ws loses on load");
+    assert_eq!(
+        rendered_models(&t),
+        ["glm-up", "glm-up", "glm-up", "qwen-up"]
+    );
+}
+
+/// The router never checks a provider's declared context window.
+#[tokio::test]
+async fn a_provider_is_chosen_whatever_its_context_window() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .provider(
+            "cloud",
+            serde_json::json!([{"name": "vendor/qwen", "aliases": ["qwen"], "contextWindow": 1}]),
+        )
+        .policy(serde_json::json!({"rules": [{"name": "to-cloud",
+            "route": {"consider": [{"type": "Provider"}], "select": [{"order": ["cloud"]}]}}]}))
+        .build()
+        .await;
+    let body = br#"{"model":"qwen","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}"#;
+
+    let out = t
+        .pick(body, 1, Qos::Interactive, Some(&TestService::pool_ref()))
+        .await;
+    assert!(
+        matches!(out, PickAndRecordOutcome::Provider { .. }),
+        "{out:?}"
+    );
+    assert!(t.metrics().contains(
+        r#"kinference_routed_requests_total{destination="cloud",tenant="default",type="Provider"} 1"#
+    ));
+    assert_eq!(t.render_calls(), 0, "nothing renders for a provider");
+}
+
+/// A local model with no count of its own, because its render failed, is
+/// taken to fit. With a count, the same window rules it out.
+#[tokio::test]
+async fn a_failed_render_skips_the_context_window_fit() {
+    for (render, fits) in [
+        (Render::Failing, true),
+        (Render::Tokens((1..=32).collect()), false),
+    ] {
+        let t = ServiceBuilder::new()
+            .render(render)
+            .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+            .policy(serde_json::json!({"rules": []}))
+            .build()
+            .await;
+        set_context_window(&t, 1, "qwen", 8);
+
+        let out = t
+            .pick(BODY, 1, Qos::Interactive, Some(&TestService::pool_ref()))
+            .await;
+        if fits {
+            assert!(
+                matches!(out, PickAndRecordOutcome::Degraded { .. }),
+                "{out:?}"
+            );
+        } else {
+            assert!(
+                matches!(out, PickAndRecordOutcome::PolicyRejected { .. }),
+                "{out:?}"
+            );
+        }
+    }
+}
+
+/// Each local model is fitted with its own tokenizer's count: `glm-up`
+/// renders the prompt to 40 tokens and `qwen-up` to 8, against a window of
+/// 16, so the busier `qwen-ws` wins.
+#[tokio::test]
+async fn each_model_is_fitted_with_its_own_count() {
+    let render = Render::PerModel(
+        [
+            ("glm-up".to_string(), Some((1..=40).collect())),
+            ("qwen-up".to_string(), Some((1..=8).collect())),
+        ]
+        .into(),
+    );
+    let t = coding_fleet(render, serde_json::json!({"rules": []})).await;
+    set_context_window(&t, 1, "glm-up", 16);
+    set_context_window(&t, 2, "qwen-up", 16);
+    make_busy(&t, 2);
+
+    let out = t
+        .pick(CODING, 1, Qos::Interactive, Some(&TestService::pool_ref()))
+        .await;
+    assert!(matches!(out, PickAndRecordOutcome::Ok { .. }), "{out:?}");
+    assert!(routed_locally_to(&t, "qwen-ws"));
+}
+
+/// A slow model that only a fall-through route uses doesn't hold up a pick
+/// that an earlier rule serves. The router starts its render with the others
+/// but never waits for it.
+#[tokio::test]
+async fn a_pick_waits_only_for_the_renders_that_it_uses() {
+    let render = Render::SlowFor {
+        model: "glm-up".into(),
+        delay: Duration::from_secs(3),
+        ids: (1..=32).collect(),
+    };
+    let policy = serde_json::json!({"rules": [{"name": "qwen-first",
+        "route": {"consider": [{"models": {"names": ["qwen-up"]}}],
+                  "select": [{"minimize": "PredictedTTFT"}],
+                  "onEmpty": "FallThrough"}}]});
+    let t = coding_fleet(render, policy).await;
+
+    let started = Instant::now();
+    let out = t
+        .pick(CODING, 1, Qos::Interactive, Some(&TestService::pool_ref()))
+        .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(matches!(out, PickAndRecordOutcome::Ok { .. }), "{out:?}");
+    assert!(routed_locally_to(&t, "qwen-ws"));
+    assert_eq!(rendered_models(&t), ["glm-up", "qwen-up"], "both started");
 }

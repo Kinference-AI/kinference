@@ -87,6 +87,16 @@ impl Scoring {
         ScoreResponse { scores }
     }
 
+    /// Score one pool's workers for one model on load alone, for a model
+    /// whose render already failed in this pick.
+    pub(crate) fn score_load_only(&self, pool: &Pool, model: &str) -> ScoreOutcome {
+        let workers = ready_workers(pool, model);
+        if workers.is_empty() {
+            return ScoreOutcome::NoWorkers;
+        }
+        ScoreOutcome::Unavailable(self.degraded_response(&workers), Degraded::Tokenize)
+    }
+
     /// Score one pool's workers for one model.
     ///
     /// `tokenizer` is passed in, since it is the service's own part.
@@ -104,14 +114,9 @@ impl Scoring {
             hashes_by_block_size: HashMap::new(),
         };
 
-        // 1. Ready workers serving this model (see `WorkerEntry::is_ready`).
-        //    None means `NoWorkers`, typically during cold start.
-        let workers: Vec<_> = pool
-            .registry
-            .workers_for_model(model)
-            .into_iter()
-            .filter(|(_, w)| w.is_ready())
-            .collect();
+        // 1. Ready workers serving this model. None means `NoWorkers`,
+        //    typically during cold start.
+        let workers = ready_workers(pool, model);
         if workers.is_empty() {
             return (ScoreOutcome::NoWorkers, side);
         }
@@ -121,6 +126,7 @@ impl Scoring {
             chat_extras,
             raw_body,
         } = input;
+        let raw_body = raw_body.map(|b| b.naming(model));
         let ChatExtras {
             tools,
             tool_choice,
@@ -264,4 +270,14 @@ impl Scoring {
         let scores: Vec<WorkerScore> = out.into_values().collect();
         (ScoreOutcome::Ok(ScoreResponse { scores }), side)
     }
+}
+
+/// `pool`'s workers that serve `model` and are ready; see
+/// `WorkerEntry::is_ready`.
+fn ready_workers(pool: &Pool, model: &str) -> Vec<(u64, WorkerEntry)> {
+    pool.registry
+        .workers_for_model(model)
+        .into_iter()
+        .filter(|(_, w)| w.is_ready())
+        .collect()
 }

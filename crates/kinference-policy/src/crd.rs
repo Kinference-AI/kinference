@@ -370,8 +370,9 @@ pub struct ProviderModel {
     /// request name can reach both.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
-    /// Declared, since vendors rarely advertise one. Requests longer than this
-    /// won't be sent here.
+    /// Declared, since vendors rarely advertise one. The router never
+    /// renders for a provider, so it does not check requests against this
+    /// window. A policy can still drop candidates by `contextWindow`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
 }
@@ -631,6 +632,10 @@ pub struct Rule {
 pub struct RequestPredicate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<RawPredicateValue>,
+    /// The prompt's length in tokens. In a rule's `matches`, the count comes
+    /// from one local model that the policy could route to, and which model
+    /// is unspecified. It is absent when no local render succeeded. In an
+    /// exclusion's `if:`, it is each candidate's own count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<RawPredicateValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -736,7 +741,9 @@ impl BackendType {
 pub struct Exclusion {
     pub name: String,
     /// Optional request-scope guard, since first-match-wins rules can't compose
-    /// exclusions.
+    /// exclusions. The router evaluates it for each candidate, with
+    /// `inputTokens` as that candidate's own count. A candidate with no
+    /// count, such as a provider, misses an `inputTokens` term.
     #[serde(default, rename = "if", skip_serializing_if = "Option::is_none")]
     pub if_: Option<RequestPredicate>,
     pub drop: CandidatePredicate,
