@@ -1,0 +1,40 @@
+name: pr-policy
+
+# Checks a pull request against docs/workflow.md and CONTRIBUTING.md
+# and reports as the `Pull request policy` check run. A label or an
+# assignment on an issue re-checks every pull request that closes it.
+# The job checks out the base branch only and reads the pull request
+# through the API, so a fork's code never runs here. The repository
+# variable POLICY_ENFORCE=true lets the check close a pull request.
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+  issues:
+    types: [labeled, unlabeled, assigned, unassigned]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: A pull request number, or all
+        required: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.event.issue.number && format('issue-{0}', github.event.issue.number) || inputs.pr }}
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  checks: write
+
+jobs:
+  policy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - run: .github/policy/pr.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          POLICY_ENFORCE: ${{ vars.POLICY_ENFORCE }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          ISSUE: ${{ github.event.issue.number }}

@@ -98,6 +98,19 @@ own sub-issue. That merge closes the parent.
 - Commits, branch history, the sign-off and the shape of a pull request
   description follow [CONTRIBUTING.md](../CONTRIBUTING.md).
 
+## Enforcement
+
+The `Pull request policy` check runs on every pull request. The check
+reads the linked issue's labels and assignee. A pull request that
+names no issue, whose issue carries neither `accepted` nor
+`needs-design`, or whose issue is assigned to someone else gets one
+comment that names the rule. When
+the repository variable `POLICY_ENFORCE` is `true`, the check also
+closes that pull request. A description or a commit that strays from
+CONTRIBUTING.md only fails the check. An edit, a push, or a label or
+an assignment on the issue runs the check again. A pull request that
+the check closed opens again once the pull request passes.
+
 ## Labels
 
 - `accepted`: a maintainer greenlit an implementation. A proposal
