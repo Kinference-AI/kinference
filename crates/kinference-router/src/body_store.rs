@@ -345,11 +345,15 @@ impl BodyStore {
         }
         // Saturating: a double release would otherwise wrap and permanently
         // "free" the budget.
-        self.bytes_in_use
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |cur| {
-                Some(cur.saturating_sub(n))
-            })
-            .ok();
+        let mut cur = self.bytes_in_use.load(Ordering::Relaxed);
+        while let Err(observed) = self.bytes_in_use.compare_exchange_weak(
+            cur,
+            cur.saturating_sub(n),
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            cur = observed;
+        }
     }
 
     /// Random, non-zero, and unused. Random so a peer can't guess into another
