@@ -49,9 +49,10 @@ pub async fn run() -> Result<()> {
 
     let cancel = CancellationToken::new();
     // Pre-bind so "ready" is logged only once the socket is listening.
-    // `TcpIncoming::new` binds synchronously and fails with an io::Error.
-    let incoming = tonic::transport::server::TcpIncoming::new(listen_addr, true, None)
-        .map_err(|e| anyhow::anyhow!("failed to bind gRPC listener on {listen_addr}: {e}"))?;
+    // `TcpIncoming::bind` binds synchronously and fails with an io::Error.
+    let incoming = tonic::transport::server::TcpIncoming::bind(listen_addr)
+        .map_err(|e| anyhow::anyhow!("failed to bind gRPC listener on {listen_addr}: {e}"))?
+        .with_nodelay(Some(true));
 
     // One Prometheus registry; each group registers its families, and
     // the admin listener renders it on `/metrics`.
