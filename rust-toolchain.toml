@@ -1,6 +1,6 @@
 # Keep in sync with the Dockerfile's `FROM rust:<version>`. Cargo.toml's
 # `rust-version` is the MSRV floor, not the version we build with.
 [toolchain]
-channel = "1.95.0"
+channel = "1.100.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

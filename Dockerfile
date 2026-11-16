@@ -7,7 +7,7 @@
 #       kinference --config /etc/kinference/config.json
 
 # Match rust-toolchain.toml, or rustup downloads that toolchain on every build.
-FROM --platform=$BUILDPLATFORM rust:1.95-slim-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:1.100-slim-bookworm AS builder
 ARG TARGETARCH
 
 # The `zmq` crate compiles a bundled libzmq with g++; cargo needs git for the
