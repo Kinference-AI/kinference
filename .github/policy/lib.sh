@@ -17,8 +17,9 @@ graphql() { gh api graphql -f owner="${REPO%/*}" -f name="${REPO#*/}" "$@"; }
 
 write() { [[ ${POLICY_DRY_RUN:-} == 1 ]] || "$@" > /dev/null; }
 
+# The bot's own comment. Anyone can post a comment that starts with MARKER.
 bot_comment_id() {
-  api "issues/$1/comments" --paginate --jq "[.[] | select(.body | startswith(\"$MARKER\"))][0].id // empty"
+  api "issues/$1/comments" --paginate --jq "[.[] | select(.user.login == \"$BOT\" and (.body | startswith(\"$MARKER\")))][0].id // empty"
 }
 
 # Replaces the bot's comment, or writes the first one.
