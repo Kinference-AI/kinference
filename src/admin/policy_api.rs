@@ -149,7 +149,6 @@ impl IntoResponse for ApiError {
 /// axum's plain text.
 pub(super) struct ApiJson<T>(pub(super) T);
 
-#[axum::async_trait]
 impl<T, S> FromRequest<S> for ApiJson<T>
 where
     Json<T>: FromRequest<S, Rejection = JsonRejection>,

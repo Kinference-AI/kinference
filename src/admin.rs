@@ -102,12 +102,9 @@ fn router(state: AppState) -> Router {
                 .fallback(|| async { policy_api::method_not_allowed("POST") }),
         )
         .route("/api", any(policy_api::not_found))
-        .route("/api/*rest", any(policy_api::not_found))
+        .route("/api/{*rest}", any(policy_api::not_found))
         .route("/metrics", get(metrics))
         .route("/readyz", get(readyz))
-        // Whatever the routes above cannot match, including a trailing-slash
-        // `/api/policy/context/`: matchit doesn't backtrack from a static
-        // prefix into `/api/*rest`.
         .fallback(fallback)
         // Applies to every route, but only `simulate` reads a body.
         .layer(axum::extract::DefaultBodyLimit::max(
