@@ -102,7 +102,7 @@ fn router(state: AppState) -> Router {
                 .fallback(|| async { policy_api::method_not_allowed("POST") }),
         )
         .route("/api", any(policy_api::not_found))
-        .route("/api/*rest", any(policy_api::not_found))
+        .route("/api/{*rest}", any(policy_api::not_found))
         .route("/metrics", get(metrics))
         .route("/readyz", get(readyz))
         // Whatever the routes above cannot match, including a trailing-slash
