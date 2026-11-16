@@ -97,6 +97,10 @@ own sub-issue. That merge closes the parent.
   else holds.
 - Commits, branch history, the sign-off and the shape of a pull request
   description follow [CONTRIBUTING.md](../CONTRIBUTING.md).
+- Dependabot opens weekly pull requests that update Cargo crates and
+  GitHub Actions. A Dependabot pull request needs no issue and no
+  six-part description. Its title and commits still follow
+  CONTRIBUTING.md.
 
 ## Enforcement
 

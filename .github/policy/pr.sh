@@ -19,6 +19,8 @@
 # "Under enforce" means the repository variable POLICY_ENFORCE is true.
 # A pull request names its issue in the Development section or in the
 # Issues part of its description. A draft skips the four shape rules.
+# A pull request from Dependabot skips the issue rules and the
+# description rule.
 # A pull request that the bot closed opens again once every rule
 # passes. A pull request that a person closed is left alone.
 #
@@ -58,6 +60,8 @@ fetch_issue() {
     }' --jq '.data.repository.issue'
 }
 
+# GraphQL reports Dependabot's login without the [bot] suffix.
+DEPENDABOT=dependabot
 PARTS='Problem|Solution|Operator-visible changes|Compatibility and rollout|Validation|Issues'
 ISSUE_REF='(closes|fixes|resolves|part of) #[0-9]+'
 
@@ -101,13 +105,16 @@ issue_rules() {
     || echo "issue #$number is not assigned to @$author"
 }
 
+is_dependabot() { [[ $(jq -r .author.login <<< "$1") == "$DEPENDABOT" ]]; }
+
 # The title and the commit subjects fit, and the description holds
-# the template's six parts in order. Prints one reason per broken rule.
+# the template's six parts in order unless Dependabot opened the pull
+# request. Prints one reason per broken rule.
 shape_rules() {
   local number=$1 pr=$2 title
   title=$(jq -r .title <<< "$pr")
   (( ${#title} <= 72 )) || echo "the title is longer than 72 characters"
-  jq -r '.body // ""' <<< "$pr" | tr -d '\r' | strip_comments | awk -v parts="$PARTS" '
+  is_dependabot "$pr" || jq -r '.body // ""' <<< "$pr" | tr -d '\r' | strip_comments | awk -v parts="$PARTS" '
     BEGIN { n = split(parts, L, "|"); next_part = 1 }
     { gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 == L[next_part]) next_part++ }
     END { if (next_part <= n) print "the description lacks the part " L[next_part] }'
@@ -128,7 +135,7 @@ check_pr() {
   [[ $state == OPEN ]] || closed_by_bot "$number" || return 0
 
   shape=$(jq -e .isDraft <<< "$pr" > /dev/null || shape_rules "$number" "$pr")
-  gate=$(issue_rules "$pr")
+  gate=$(is_dependabot "$pr" || issue_rules "$pr")
   reasons=$(printf '%s\n' "$shape" "$gate" | sed '/^$/d')
   echo "#$number: ${reasons:-passes}"
 
