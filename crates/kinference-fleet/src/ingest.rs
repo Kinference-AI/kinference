@@ -25,12 +25,11 @@ use dynamo_kv_router::indexer::KvIndexerInterface;
 use dynamo_kv_router::protocols::{KvCacheEventData, WorkerWithDpRank};
 use dynamo_kv_router::recovery::{CursorObservation, CursorState};
 use dynamo_kv_router::zmq_wire::{
-    KvCacheSpecKind, RawKvEvent, ZmqEventNormalizer, decode_event_batch,
+    KvEventBatch, RawKvEvent, ZmqEventFilterReason, ZmqEventNormalizer, decode_event_batch,
 };
 use tokio::io::unix::AsyncFd;
 
 use crate::error::Error;
-use crate::eviction::{EvictionReason, EvictionRequest, EvictionTx};
 use crate::metrics::IngestEvent;
 use crate::pool::WorkerContext;
 
@@ -72,8 +71,7 @@ impl Default for IngestConfig {
 }
 
 /// Spawn the ingest listener for a single worker. The listener feeds the
-/// pool's `KvIndexer` and inflight prefixes through `ctx`, and requests
-/// eviction on a block_size mismatch.
+/// pool's `KvIndexer` and inflight prefixes through `ctx`.
 pub fn spawn_worker_listener(ctx: WorkerContext, ingest: IngestConfig) {
     let cfg = &ctx.cfg;
     if ingest.disabled {
@@ -102,12 +100,13 @@ pub fn spawn_worker_listener(ctx: WorkerContext, ingest: IngestConfig) {
         // `LISTENER_HEALTHY_AFTER`, so a listener that keeps failing warns
         // once.
         let mut failing = false;
+        let mut memory = WorkerMemory::default();
         loop {
             if ctx.cancel.is_cancelled() {
                 return;
             }
             let started = Instant::now();
-            if let Err(err) = run_listener(&ctx, &ingest).await {
+            if let Err(err) = run_listener(&ctx, &ingest, &mut memory).await {
                 if started.elapsed() >= LISTENER_HEALTHY_AFTER {
                     failing = false;
                 }
@@ -129,14 +128,26 @@ pub fn spawn_worker_listener(ctx: WorkerContext, ingest: IngestConfig) {
     });
 }
 
+/// What ingest remembers about one worker across reconnects. The radix tree
+/// keeps the worker's blocks across a reconnect, so this state must too.
+#[derive(Default)]
+struct WorkerMemory {
+    /// Whether ingest has indexed a stored block for this worker. Until
+    /// then the tree holds nothing that a `BlockRemoved` event could remove.
+    stored_indexed: bool,
+    /// The plausible mismatching block sizes that ingest has warned about,
+    /// capped at [`MAX_WARNED_BLOCK_SIZES`].
+    warned_block_sizes: Vec<u32>,
+    warned_block_size_cap: bool,
+    warned_implausible_block_size: bool,
+}
+
 /// Per-listener mutable state: the cursor (for gap detection) and the event
 /// normalizer, built once from the pool's `kv_block_size`.
-struct ListenerState {
+struct ListenerState<'a> {
     cursor: CursorState,
     normalizer: ZmqEventNormalizer,
-    /// Debounces block_size-mismatch eviction so a single corrupt frame
-    /// can't take a healthy worker out of rotation. See [`BlockSizeGuard`].
-    block_size_guard: BlockSizeGuard,
+    memory: &'a mut WorkerMemory,
     /// Which warnings this listener has logged, so each logs once.
     warned: ListenerWarnings,
 }
@@ -253,7 +264,11 @@ impl ReplayProgress {
 /// Run a single listener until it errors or `cancel` fires. All gap recovery
 /// happens inside the SUB-recv branch, synchronously, before the triggering
 /// frame is applied.
-async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<(), Error> {
+async fn run_listener(
+    ctx: &WorkerContext,
+    ingest: &IngestConfig,
+    memory: &mut WorkerMemory,
+) -> Result<(), Error> {
     let cfg = &ctx.cfg;
     let block_size = ctx.block_size;
     let workers = &ctx.registry;
@@ -286,7 +301,7 @@ async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<(), 
     let mut state = ListenerState {
         cursor: CursorState::Initial,
         normalizer: ZmqEventNormalizer::new(block_size),
-        block_size_guard: BlockSizeGuard::new(block_size),
+        memory,
         warned: ListenerWarnings::default(),
     };
     // Whether this listener has reported that events are flowing, so the
@@ -369,7 +384,7 @@ async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<(), 
                     observed_events = true;
                     workers.note_kv_events_observed(worker_id_num);
                 }
-                let evicted = handle_observation(
+                handle_observation(
                     ctx,
                     &mut state,
                     seq,
@@ -378,10 +393,6 @@ async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<(), 
                     replay_wall_budget,
                 )
                 .await;
-                if evicted {
-                    // Block-size mismatch: eviction sent, so exit.
-                    return Ok(());
-                }
             }
         }
     }
@@ -391,12 +402,12 @@ async fn run_listener(ctx: &WorkerContext, ingest: &IngestConfig) -> Result<(), 
 /// dynamo's `ListenerLoop::handle_message` / `handle_gap`.
 async fn handle_observation(
     ctx: &WorkerContext,
-    state: &mut ListenerState,
+    state: &mut ListenerState<'_>,
     seq: u64,
     payload: &[u8],
     replay: Option<&mut ZmqSocket>,
     replay_wall_budget: Duration,
-) -> bool {
+) {
     let worker_id_str = &ctx.cfg.worker_id_str;
     match state.cursor.observe(seq) {
         CursorObservation::Initial { got } if got > 0 => {
@@ -441,7 +452,7 @@ async fn handle_observation(
                 ?last_applied,
                 "dropping a stale KV-event frame"
             );
-            return false;
+            return;
         }
         CursorObservation::Initial { .. }
         | CursorObservation::Contiguous { .. }
@@ -450,12 +461,8 @@ async fn handle_observation(
         }
     }
 
-    let evicted = apply_frame(ctx, state, seq, payload).await;
-    if evicted {
-        return true;
-    }
+    apply_frame(ctx, state, seq, payload).await;
     state.cursor = state.cursor.advance_to(seq);
-    false
 }
 
 /// Drain `[start_seq, end_seq)` from the DEALER replay socket, applying each
@@ -467,7 +474,7 @@ async fn handle_observation(
 /// Ported from dynamo's `ListenerLoop::replay_gap`.
 async fn replay_gap(
     ctx: &WorkerContext,
-    state: &mut ListenerState,
+    state: &mut ListenerState<'_>,
     dealer: &mut ZmqSocket,
     start_seq: u64,
     end_seq: u64,
@@ -562,11 +569,7 @@ async fn replay_gap(
             }
         }
 
-        let evicted = apply_frame(ctx, state, seq, payload).await;
-        if evicted {
-            // Block-size mismatch: eviction sent, stop replaying.
-            return;
-        }
+        apply_frame(ctx, state, seq, payload).await;
         state.cursor = state.cursor.advance_to(seq);
         progress.record(seq);
 
@@ -628,17 +631,9 @@ fn parse_seq_payload(msg: &[Vec<u8>]) -> Option<(u64, &[u8])> {
 // --- Bookkeeping ------------------------------------------------------
 
 /// Decode one ZMQ payload and apply each event to the radix tree,
-/// [`InflightPrefixes::on_stored`] and the ingest metrics.
-///
-/// Returns `true` when this listener should stop because a
-/// block_size mismatch was detected and eviction has been signaled.
-async fn apply_frame(
-    ctx: &WorkerContext,
-    state: &mut ListenerState,
-    seq: u64,
-    payload: &[u8],
-) -> bool {
-    let worker_id_num = ctx.cfg.worker_id_num;
+/// [`InflightPrefixes::on_stored`] and the ingest metrics. An event that
+/// ingest can't index is counted and skipped; no event stops the listener.
+async fn apply_frame(ctx: &WorkerContext, state: &mut ListenerState<'_>, seq: u64, payload: &[u8]) {
     let worker_id_str = &ctx.cfg.worker_id_str;
     let batch = match decode_event_batch(payload) {
         Ok(b) => b,
@@ -651,29 +646,63 @@ async fn apply_frame(
                     "failed to decode a KV-event batch"
                 );
             }
-            return false;
+            return;
         }
     };
 
+    apply_batch(ctx, state, seq, batch).await;
+}
+
+async fn apply_batch(
+    ctx: &WorkerContext,
+    state: &mut ListenerState<'_>,
+    seq: u64,
+    batch: KvEventBatch,
+) {
+    let worker_id_num = ctx.cfg.worker_id_num;
+    let worker_id_str = &ctx.cfg.worker_id_str;
     let effective_dp_rank = batch
         .data_parallel_rank
         .map_or(0u32, |rank| rank.cast_unsigned());
 
+    let worker = WorkerWithDpRank::new(worker_id_num, effective_dp_rank);
     for raw_event in batch.events {
-        if state.block_size_guard.observe(
-            &raw_event,
-            worker_id_num,
-            worker_id_str,
-            &ctx.eviction_tx,
-        ) {
-            // Mismatch: eviction sent; the rest of the batch is suspect.
-            return true;
+        // The normalizer filters the events of non-main attention groups
+        // first, so their smaller blocks never count as a mismatch.
+        let raw_event = match state.normalizer.preprocess_with_reason(raw_event, worker) {
+            Ok(raw_event) => raw_event,
+            Err(reason) => {
+                // The other reasons name events that the index never holds
+                // by design, so only these two count as a skip.
+                if matches!(
+                    reason,
+                    ZmqEventFilterReason::UnknownKind | ZmqEventFilterReason::UnlearnedGroupIdx
+                ) {
+                    ctx.prom
+                        .record_kv_event_skipped(&ctx.pool_name, reason.as_label());
+                }
+                continue;
+            }
+        };
+        let skip = match &raw_event {
+            RawKvEvent::BlockStored { block_size, .. }
+                if *block_size != ctx.block_size as usize =>
+            {
+                Some(warn_block_size_mismatch(ctx, state.memory, *block_size))
+            }
+            RawKvEvent::BlockRemoved { .. } if !state.memory.stored_indexed => {
+                Some(SKIP_NOTHING_STORED)
+            }
+            _ => None,
+        };
+        if let Some(reason) = skip {
+            ctx.prom.record_kv_event_skipped(&ctx.pool_name, reason);
+            continue;
         }
-        let Some(placement_event) = state.normalizer.normalize(
-            raw_event,
-            seq,
-            WorkerWithDpRank::new(worker_id_num, effective_dp_rank),
-        ) else {
+        let Some(placement_event) = state
+            .normalizer
+            .normalize_preprocessed(raw_event, seq, worker)
+        else {
             continue;
         };
         let Some(router_event) = placement_event.into_router_event() else {
@@ -694,6 +723,7 @@ async fn apply_frame(
                 let stored_hashes: Vec<u64> = d.blocks.iter().map(|b| b.tokens_hash.0).collect();
                 ctx.inflight_prefixes
                     .on_stored(&ctx.endpoint_key, &stored_hashes);
+                state.memory.stored_indexed |= !d.blocks.is_empty();
                 (IngestEvent::Stored, d.blocks.len() as u64)
             }
             KvCacheEventData::Removed(d) => (IngestEvent::Removed, d.block_hashes.len() as u64),
@@ -702,179 +732,73 @@ async fn apply_frame(
         ctx.prom.record_index_event(ev_kind, n_blocks);
         ctx.indexer.apply_event(router_event).await;
     }
-    false
 }
 
-/// KV block sizes are small (SGLang page-size 1, vLLM 16, Gemma 64). A
-/// `BlockStored` event above this bound is treated as a decode or transport
-/// glitch (e.g. a misframed message after a reconnect), dropped and never
-/// evicted on.
-const MAX_PLAUSIBLE_BLOCK_SIZE: u32 = 1024;
+/// The `reason` label for a `BlockStored` event whose block size differs
+/// from the worker set's `kvBlockSize`. The normalizer would index none of
+/// the event's blocks.
+const SKIP_BLOCK_SIZE_MISMATCH: &str = "block_size_mismatch";
 
-/// How many consecutive main-attention `BlockStored` events must agree on
-/// the same (plausible) mismatching block_size before we evict. A real
-/// mismatch repeats; a corrupt frame doesn't.
-const BLOCK_SIZE_MISMATCH_EVICT_THRESHOLD: u32 = 3;
+/// The `reason` label for a `BlockStored` event whose block size is 0 or
+/// above [`MAX_PLAUSIBLE_BLOCK_SIZE`].
+const SKIP_IMPLAUSIBLE_BLOCK_SIZE: &str = "implausible_block_size";
 
-/// Verdict for one observed block_size, from [`BlockSizeGuard::classify`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BlockSizeVerdict {
-    /// Matches the configured value; the stream is healthy.
-    Healthy,
-    /// Implausible value: a glitch, dropped without affecting the debounce
-    /// state.
-    Glitch,
-    /// Plausible value that mismatches, but not yet seen enough
-    /// consecutive times to be sure it's a real config error.
-    Pending { consecutive: u32 },
-    /// A sustained mismatch at one value: a genuine misconfiguration. The
-    /// caller should evict.
-    Evict,
-}
+/// The `reason` label for a `BlockRemoved` event from a worker that has no
+/// indexed block.
+const SKIP_NOTHING_STORED: &str = "nothing_stored";
 
-/// Per-listener guard against evicting a worker on a spurious block_size.
-///
-/// `dynamo_kv_router` silently drops mismatched main-attention events, so a
-/// sustained mismatch would leave the radix tree empty; eviction makes it
-/// loud. A transient corrupt frame (an implausible value, or a plausible one
-/// seen once) doesn't evict.
-struct BlockSizeGuard {
-    configured: u32,
-    /// The last plausible, mismatching block_size observed, and how many
-    /// consecutive events reported exactly it. Reset whenever an event
-    /// matches `configured`, so only a *sustained* mismatch trips.
-    last_observed: Option<u32>,
-    consecutive: u32,
-    /// Whether we've already warned that this worker's KV events are being
-    /// dropped (e.g. a hybrid/Mamba model). Later drops log at debug.
-    warned_persistent_drop: bool,
-}
+/// KV block sizes are small (SGLang page-size 1, vLLM 16, Gemma 256). A
+/// larger size is a misframed message, or a hybrid model's Mamba state block
+/// (e.g. 1568 tokens) from a vLLM build that doesn't tag events with
+/// `kv_cache_spec_kind`. Neither says anything about `kvBlockSize`.
+const MAX_PLAUSIBLE_BLOCK_SIZE: usize = 1024;
 
-impl BlockSizeGuard {
-    fn new(configured: u32) -> Self {
-        Self {
-            configured,
-            last_observed: None,
-            consecutive: 0,
-            warned_persistent_drop: false,
+/// How many distinct plausible mismatching block sizes ingest warns about
+/// for one worker.
+const MAX_WARNED_BLOCK_SIZES: usize = 8;
+
+/// Warn about a `BlockStored` event at a block size other than
+/// `kvBlockSize`, once per worker and block size, and return the skip
+/// reason. Implausible sizes share one line per worker.
+fn warn_block_size_mismatch(
+    ctx: &WorkerContext,
+    memory: &mut WorkerMemory,
+    block_size: usize,
+) -> &'static str {
+    if block_size == 0 || block_size > MAX_PLAUSIBLE_BLOCK_SIZE {
+        if !std::mem::replace(&mut memory.warned_implausible_block_size, true) {
+            tracing::warn!(
+                workerset = ctx.pool_name,
+                worker_id = ctx.cfg.worker_id_str,
+                block_size,
+                kv_block_size = ctx.block_size,
+                "skipping KV events with an implausible block size"
+            );
         }
+        return SKIP_IMPLAUSIBLE_BLOCK_SIZE;
     }
-
-    /// Debounce and sanity check over a block_size, with no I/O.
-    fn classify(&mut self, engine_block_size: u32) -> BlockSizeVerdict {
-        if engine_block_size == self.configured {
-            self.last_observed = None;
-            self.consecutive = 0;
-            return BlockSizeVerdict::Healthy;
-        }
-        if engine_block_size == 0 || engine_block_size > MAX_PLAUSIBLE_BLOCK_SIZE {
-            // A glitch; varied garbage shouldn't accumulate toward eviction.
-            return BlockSizeVerdict::Glitch;
-        }
-        if self.last_observed == Some(engine_block_size) {
-            self.consecutive += 1;
-        } else {
-            self.last_observed = Some(engine_block_size);
-            self.consecutive = 1;
-        }
-        if self.consecutive >= BLOCK_SIZE_MISMATCH_EVICT_THRESHOLD {
-            BlockSizeVerdict::Evict
-        } else {
-            BlockSizeVerdict::Pending {
-                consecutive: self.consecutive,
-            }
-        }
+    // Lossless: the size is at most `MAX_PLAUSIBLE_BLOCK_SIZE`.
+    let block_size = block_size as u32;
+    if memory.warned_block_sizes.contains(&block_size) {
+        return SKIP_BLOCK_SIZE_MISMATCH;
     }
-
-    /// Inspect one raw event. Returns `true` iff a sustained block_size
-    /// mismatch has been confirmed and an eviction request was sent.
-    fn observe(
-        &mut self,
-        raw_event: &RawKvEvent,
-        worker_id_num: u64,
-        worker_id_str: &str,
-        eviction_tx: &EvictionTx,
-    ) -> bool {
-        let RawKvEvent::BlockStored {
+    if memory.warned_block_sizes.len() < MAX_WARNED_BLOCK_SIZES {
+        memory.warned_block_sizes.push(block_size);
+        tracing::warn!(
+            workerset = ctx.pool_name,
+            worker_id = ctx.cfg.worker_id_str,
             block_size,
-            kv_cache_spec_kind,
-            ..
-        } = raw_event
-        else {
-            return false;
-        };
-        // Models with sliding-window or chunked-local layers (Gemma 3,
-        // Mistral, some MoEs) also emit BlockStored events for those layers,
-        // with smaller blocks. Mirror the normalizer's `kv_cache_spec_kind`
-        // filter so they don't look like a mismatch.
-        //
-        // `None` (untagged) is kept, as for a single-attention model. On a
-        // hybrid/Mamba model (e.g. Qwen3-*-Instruct) with a vLLM build that
-        // doesn't tag events, the Mamba state blocks (huge block_size, e.g.
-        // 1568) also arrive untagged, and are caught only by
-        // `MAX_PLAUSIBLE_BLOCK_SIZE`, disabling prefix routing for the worker.
-        // The fix is an engine build that emits `kv_cache_spec_kind`; the
-        // dynamo-kv-router version is not the problem.
-        let is_main_attention = match kv_cache_spec_kind {
-            None => true,
-            Some(
-                KvCacheSpecKind::FullAttention
-                | KvCacheSpecKind::MlaAttention
-                | KvCacheSpecKind::SinkFullAttention,
-            ) => true,
-            Some(_) => false,
-        };
-        if !is_main_attention {
-            return false;
-        }
-        let engine_block_size = *block_size as u32;
-        match self.classify(engine_block_size) {
-            BlockSizeVerdict::Healthy => false,
-            BlockSizeVerdict::Glitch => {
-                let configured = self.configured;
-                if !self.warned_persistent_drop {
-                    // Warn once, then log at debug.
-                    self.warned_persistent_drop = true;
-                    tracing::warn!(
-                        worker_id = worker_id_str,
-                        engine_block_size,
-                        configured,
-                        "dropping KV events with an implausible block size; check kvBlockSize \
-                         and the engine's KV-event schema"
-                    );
-                } else {
-                    tracing::debug!(
-                        worker_id = worker_id_str,
-                        engine_block_size,
-                        configured,
-                        "dropping KV events with an implausible block size"
-                    );
-                }
-                false
-            }
-            BlockSizeVerdict::Pending { consecutive } => {
-                tracing::debug!(
-                    worker_id = worker_id_str,
-                    engine_block_size,
-                    configured = self.configured,
-                    consecutive,
-                    threshold = BLOCK_SIZE_MISMATCH_EVICT_THRESHOLD,
-                    "engine block size differs from kvBlockSize"
-                );
-                false
-            }
-            BlockSizeVerdict::Evict => {
-                let _ = eviction_tx.send(EvictionRequest {
-                    worker_id_num,
-                    reason: EvictionReason::BlockSizeMismatch {
-                        expected: self.configured,
-                        observed: engine_block_size,
-                    },
-                });
-                true
-            }
-        }
+            kv_block_size = ctx.block_size,
+            "skipping KV events whose block size differs from kvBlockSize"
+        );
+    } else if !std::mem::replace(&mut memory.warned_block_size_cap, true) {
+        tracing::warn!(
+            workerset = ctx.pool_name,
+            worker_id = ctx.cfg.worker_id_str,
+            "more mismatching block sizes are not logged"
+        );
     }
+    SKIP_BLOCK_SIZE_MISMATCH
 }
 
 fn log_event(

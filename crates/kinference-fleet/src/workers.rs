@@ -77,9 +77,8 @@ pub struct WorkerEntry {
     /// HTTP base URL for the engine's OpenAI-compatible `/tokenize`. `None`
     /// if not configured.
     pub http_url: Option<String>,
-    /// KV-cache hash block size, the worker set's `kv_block_size`. A worker
-    /// whose events report a different value is evicted (see
-    /// `ingest::BlockSizeGuard`).
+    /// KV-cache hash block size, the worker set's `kv_block_size`. Ingest
+    /// skips a worker's events at any other block size.
     pub block_size: u32,
     /// True once the ZMQ listener has finished its initial replay-drain and is
     /// receiving live. Part of [`Self::is_ready`]. Sticky across libzmq

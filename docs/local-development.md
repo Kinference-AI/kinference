@@ -212,9 +212,11 @@ jq -c '.inflight_overlap_blocks | fromjson' observations.jsonl
   yet, usually because the CRDs chart is not installed.
 - `kinference_index_blocks` stays 0: the prompt was shorter than a block;
   or `kvBlockSize` disagrees with the block size that the engine
-  publishes, which Kinference logs as a block size mismatch and the
-  engine logs as `Block not published. Block size must be N tokens`; or
-  someone set `KINFERENCE_DISABLE_INGEST`.
+  publishes; or someone set `KINFERENCE_DISABLE_INGEST`. On a
+  disagreement, Kinference logs one WARN line with the engine's
+  `block_size`, and
+  `kinference_kv_events_skipped_total{reason="block_size_mismatch"}`
+  rises.
 
 ## A full request path
 

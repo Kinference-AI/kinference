@@ -202,12 +202,12 @@ an eviction request, the coordinator cancels those tasks and drops the
 worker from every store, but only if the pool that asks is the one that
 registered the worker.
 
-The worker's own tasks send eviction requests. The ingest task sends one
-when it sees events at a block size other than the pool's, and the poller
-sends one when the worker's `/v1/models` list disagrees with the pool's
-canonical set. The task sends the request over the eviction channel, and
-the coordinator does the teardown, so the lifecycle logic stays in one
-place.
+The metrics poller sends an eviction request when the worker's
+`/v1/models` list disagrees with the pool's canonical set. The poller
+sends the request over the eviction channel, and the coordinator does
+the teardown, so the lifecycle logic stays in one place. No KV event
+leads to an eviction. The ingest task skips an event that it can't
+index and counts the skip in `kinference_kv_events_skipped_total`.
 
 ### KV events
 

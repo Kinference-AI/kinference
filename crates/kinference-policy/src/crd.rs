@@ -70,14 +70,14 @@ pub struct InferenceWorkerSetSpec {
     /// Not necessarily the engine's `--block-size`. They coincide for standard
     /// vLLM (16), but Gemma 4 reports `block_size="64"` in
     /// `vllm:cache_config_info` while publishing 256-token blocks, and SGLang
-    /// `--page-size 1` publishes 1. The log line `Block not published. Block
-    /// size must be N tokens to be published. Block size is: M` gives the right
-    /// value, M.
+    /// `--page-size 1` publishes 1. On a mismatch, Kinference logs a WARN
+    /// line with the block size of the engine's events.
     ///
-    /// With a wrong value, mismatched blocks are dropped, so the prefix tree
-    /// stays empty and picks degrade to load-only with no error. After
-    /// `BLOCK_SIZE_MISMATCH_EVICT_THRESHOLD` consecutive mismatched events the
-    /// endpoint is evicted; one matching event resets the count.
+    /// With a wrong value, Kinference skips the mismatched events, so the
+    /// prefix tree stays empty and picks degrade to load-only. The workers
+    /// stay in service. `kinference_kv_events_skipped_total` counts the
+    /// skipped events under `reason="block_size_mismatch"`, and the
+    /// removals that follow them under `reason="nothing_stored"`.
     ///
     /// Required by the schema; see the module docs for why it is `Option`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

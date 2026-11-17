@@ -49,8 +49,7 @@ spec:
             # its `block_hash mismatch` warning is harmless (the tree keys on
             # tokens_hash, computed by kinference) but fires several times a
             # second. A broken chain shows on the dashboard's prefix cache row
-            # instead. `Block not published. Block size must be N` comes from
-            # another module and stays visible: set kvBlockSize to the engine's.
+            # instead.
             - name: RUST_LOG
               value: {{ .Values.logLevel | quote }}
             - name: KINFERENCE_LOG_FORMAT
