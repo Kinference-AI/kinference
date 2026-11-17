@@ -26,10 +26,10 @@ prometheus.workspace = true
 # need. Default features pull python-binding scaffolding.
 tokenizers = { version = "0.23", default-features = false, features = ["http", "onig"] }
 # `loop_controls` for `{% break %}` (Mistral, Hermes); `json` for `tojson`
-# (Llama 3.2 vision).
-minijinja = { version = "2.20", features = ["loop_controls", "json"] }
+# (Llama 3.2 vision); `serde` to pass the JSON request context.
+minijinja = { version = "3.1", features = ["loop_controls", "json", "serde"] }
 # `pycompat` for Python dict methods such as `.get` (Gemma 3/4).
-minijinja-contrib = { version = "2.20", features = ["pycompat"] }
+minijinja-contrib = { version = "3.1", features = ["pycompat"] }
 # `strftime_now`, which Llama 3.1+ templates call.
 chrono.workspace = true
 getrandom.workspace = true
