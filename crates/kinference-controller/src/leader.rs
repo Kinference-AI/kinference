@@ -410,7 +410,7 @@ pub fn identity(pod_name: Option<String>) -> String {
         return host;
     }
     let mut b = [0u8; 8];
-    let _ = getrandom::getrandom(&mut b);
+    let _ = getrandom::fill(&mut b);
     format!("kinference-{}", u64::from_le_bytes(b))
 }
 

@@ -478,7 +478,7 @@ pub fn pick_endpoint<'a>(inputs: &PickInputs<'a>) -> Option<PickResult<'a>> {
         eligible[0].0
     } else {
         let mut buf = [0u8; 8];
-        match getrandom::getrandom(&mut buf) {
+        match getrandom::fill(&mut buf) {
             Ok(()) => {
                 let r = u64::from_le_bytes(buf) as usize;
                 eligible[r % eligible.len()].0
