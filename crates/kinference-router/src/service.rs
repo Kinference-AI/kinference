@@ -434,7 +434,7 @@ impl KinferenceService {
     pub(crate) fn mint_response_id(&self) -> u64 {
         loop {
             let mut buf = [0u8; 8];
-            let id = match getrandom::getrandom(&mut buf) {
+            let id = match getrandom::fill(&mut buf) {
                 Ok(()) => u64::from_le_bytes(buf),
                 Err(e) => {
                     tracing::error!(

@@ -357,7 +357,7 @@ impl BodyStore {
     fn mint_id(&self) -> u64 {
         loop {
             let mut buf = [0u8; 8];
-            let candidate = match getrandom::getrandom(&mut buf) {
+            let candidate = match getrandom::fill(&mut buf) {
                 Ok(()) => u64::from_le_bytes(buf),
                 Err(e) => {
                     tracing::error!(

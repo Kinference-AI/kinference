@@ -301,7 +301,7 @@ fn sample_weighted(groups: &[super::compile::CompiledConsiderGroup]) -> Option<u
         return None;
     }
     let mut buf = [0u8; 8];
-    let roll = match getrandom::getrandom(&mut buf) {
+    let roll = match getrandom::fill(&mut buf) {
         Ok(()) => u64::from_le_bytes(buf) % total,
         Err(e) => {
             // Deterministic fallback beats failing the request; log so a broken
@@ -496,7 +496,7 @@ fn pick_among(
 ) -> (Candidate, usize) {
     let idx = if tied > 1 && tie_break.contains(&TieBreak::Random) {
         let mut buf = [0u8; 8];
-        match getrandom::getrandom(&mut buf) {
+        match getrandom::fill(&mut buf) {
             Ok(()) => (u64::from_le_bytes(buf) as usize) % tied,
             Err(_) => 0,
         }

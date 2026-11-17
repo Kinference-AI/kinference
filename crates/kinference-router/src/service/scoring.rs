@@ -67,7 +67,7 @@ impl Scoring {
             1 => Some(candidates[0].clone()),
             n => {
                 let mut buf = [0u8; 8];
-                let idx = match getrandom::getrandom(&mut buf) {
+                let idx = match getrandom::fill(&mut buf) {
                     Ok(()) => (u64::from_le_bytes(buf) as usize) % n,
                     Err(_) => 0,
                 };
