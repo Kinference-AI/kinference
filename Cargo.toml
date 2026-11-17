@@ -49,6 +49,9 @@ futures = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 axum = "0.8"
 tempfile = "3"
+# Same major version as kube-client's, so it adds no crate to the build.
+serde-saphyr = "2"
+tracing-subscriber = "0.3"
 
 [workspace.lints.clippy]
 # Service functions return `tonic::Status`, which is large, by contract.
@@ -72,9 +75,9 @@ tonic.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util.workspace = true
 serde.workspace = true
-zmq = "0.10"
+zmq.workspace = true
 tracing.workspace = true
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 anyhow = "1"
 clap.workspace = true
 serde_json.workspace = true

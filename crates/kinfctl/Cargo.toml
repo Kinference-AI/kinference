@@ -12,8 +12,8 @@ clap.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-serde-saphyr = "2.1.1"
-tempfile = "3"
+serde-saphyr.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
