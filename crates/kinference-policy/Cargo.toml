@@ -21,8 +21,7 @@ k8s-openapi.workspace = true
 # Required by the `CustomResource` derive. The schema is never emitted; the
 # hand-written CRDs in charts/kinference-crds are the source of truth.
 schemars = "1"
-# Same version as kube-client's, so it adds no crate to the build.
-serde-saphyr = "2.1.1"
+serde-saphyr.workspace = true
 serde_path_to_error = "0.1"
 
 [lints]
