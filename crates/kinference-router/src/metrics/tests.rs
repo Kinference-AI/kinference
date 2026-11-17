@@ -924,30 +924,19 @@ fn from_proto_never_yields_unknown() {
     }
 }
 
-/// The prediction histogram is labelled per worker and shares `kinference_ttft_ms`'s
-/// bucket edges.
-///
-/// Shared edges, so predicted and observed distributions are comparable.
+/// The prediction histogram is labelled per model only and shares
+/// `kinference_ttft_ms`'s bucket edges, so the two are comparable.
 #[test]
-fn predicted_ttft_is_per_worker_and_shares_the_observed_buckets() {
+fn predicted_ttft_is_per_model_and_shares_the_observed_buckets() {
     let p = metrics();
-    p.record_predicted_ttft("10.0.0.1:8000", "gemma-4", 120.0);
-    p.record_predicted_ttft("10.0.0.1:8000", "gemma-4", 3000.0);
-    p.record_predicted_ttft("10.0.0.2:8000", "gemma-4", 30.0);
+    p.record_predicted_ttft("gemma-4", 120.0);
+    p.record_predicted_ttft("gemma-4", 3000.0);
+    p.record_predicted_ttft("gemma-4", 30.0);
     let out = p.render();
-
-    // Both workers get their own series.
     assert!(
         has_line(
             &out,
-            "kinference_predicted_ttft_ms_count{model=\"gemma-4\",worker=\"10.0.0.1:8000\"} 2"
-        ),
-        "{out}"
-    );
-    assert!(
-        has_line(
-            &out,
-            "kinference_predicted_ttft_ms_count{model=\"gemma-4\",worker=\"10.0.0.2:8000\"} 1"
+            "kinference_predicted_ttft_ms_count{model=\"gemma-4\"} 3"
         ),
         "{out}"
     );

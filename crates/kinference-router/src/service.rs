@@ -648,7 +648,7 @@ fn best_group(
                 // Every endpoint's prediction is recorded, as on the policy
                 // path.
                 if let Some(p) = prom {
-                    p.record_predicted_ttft(&s.endpoint, &group.model, ms as f64);
+                    p.record_predicted_ttft(&group.model, ms as f64);
                 }
                 ms
             })

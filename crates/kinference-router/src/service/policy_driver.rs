@@ -414,7 +414,7 @@ impl KinferenceService {
                 // Recorded for every candidate, as a `predictedTTFT` threshold
                 // applies to every candidate; winners only would bias it low.
                 self.prom
-                    .record_predicted_ttft(&s.endpoint, &group.model, predicted as f64);
+                    .record_predicted_ttft(&group.model, predicted as f64);
                 let hit_ratio = if s.total_blocks > 0 {
                     s.matched_blocks as f64 / s.total_blocks as f64
                 } else {
