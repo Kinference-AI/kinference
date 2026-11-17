@@ -11,7 +11,7 @@ kinference-policy.workspace = true
 kinference-fleet.workspace = true
 dynamo-kv-router.workspace = true
 tonic.workspace = true
-prost = "0.13"
+prost = "0.14"
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tokio-util.workspace = true
 tokio-stream = "0.1"
