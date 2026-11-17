@@ -51,9 +51,14 @@ pub struct WorkerTaskSettings {
 /// The receiving ends of the coordinator's two channels, drained by
 /// [`Coordinator::run`].
 pub struct Inbox {
-    changes: mpsc::Receiver<(Arc<Pool>, WorkerChange)>,
+    changes: mpsc::Receiver<PoolChange>,
     evictions: eviction::EvictionRx,
 }
+
+/// A discovery event, tagged with its pool and with the discovery token of
+/// the run that produced it. `run` drops the event once that token is
+/// cancelled, so a retired pool's queued events can't re-register workers.
+type PoolChange = (Arc<Pool>, CancellationToken, WorkerChange);
 
 /// Owns the worker lifecycle: registers and tears down workers as discovery
 /// and eviction events arrive, and implements [`PoolHooks`] so a pool's
@@ -67,7 +72,7 @@ pub struct Coordinator {
     settings: WorkerTaskSettings,
     /// Each pool runs its own discovery; a per-pool forwarder tags its
     /// events with the pool and sends them here.
-    coord_tx: mpsc::Sender<(Arc<Pool>, WorkerChange)>,
+    coord_tx: mpsc::Sender<PoolChange>,
     /// Ingest and the scrape request a worker's eviction here on a
     /// homogeneity violation; `run` does the same teardown as for `Removed`.
     eviction_tx: eviction::EvictionTx,
@@ -131,9 +136,19 @@ impl Coordinator {
                     }
                 }
                 change = inbox.changes.recv() => {
-                    let Some((pool, change)) = change else {
+                    let Some((pool, discovery, change)) = change else {
                         unreachable!("the coordinator holds a discovery sender");
                     };
+                    // Queued before the pool retired. `on_retire` already
+                    // dropped the pool's workers, and the indexer may be
+                    // reaped soon.
+                    if discovery.is_cancelled() {
+                        tracing::debug!(
+                            workerset = pool.name,
+                            "dropping a retired worker set's discovery event"
+                        );
+                        continue;
+                    }
                     match change {
                         WorkerChange::Added(w) => self.add_worker(&pool, w),
                         WorkerChange::Removed(num) => self.evict_worker(&pool, num, None).await,
@@ -174,28 +189,29 @@ impl Coordinator {
             return;
         }
 
-        // Provisionally route the model_name hint, before the first
-        // /v1/models scrape.
-        self.worker_pool.insert(w.worker_id_num, pool.clone());
-        if !w.model_name.is_empty() {
-            self.models
-                .associate(pool.id, &pool.name, std::slice::from_ref(&w.model_name));
-        }
-
         // Seeded from config.model_name; `by_model` is updated by the
         // metrics poller and warmup.
         let entry = WorkerEntry::from_config(&w, block_size);
         // The key the pick path uses for inflight state, which the ZMQ
         // listener also keys `on_stored` by.
         let endpoint_key = entry.score_addr.clone();
+        // Before the claim: a duplicate Added must leave the existing
+        // owner entry in place.
         if !registry.register(w.worker_id_num, entry) {
             tracing::warn!(
                 workerset = pool.name,
                 worker_id = w.worker_id_str,
                 "worker id already registered; skipping"
             );
-            self.worker_pool.remove(&w.worker_id_num);
             return;
+        }
+
+        // Provisionally route the model_name hint, before the first
+        // /v1/models scrape.
+        self.worker_pool.insert(w.worker_id_num, pool.clone());
+        if !w.model_name.is_empty() {
+            self.models
+                .associate(pool.id, &pool.name, std::slice::from_ref(&w.model_name));
         }
 
         let worker_token = self.cancel.child_token();
@@ -365,13 +381,27 @@ impl PoolHooks for Coordinator {
 
         let (pool_tx, mut pool_rx) = mpsc::channel::<WorkerChange>(64);
         tokio::spawn(build(spec.discovery.clone(), pool_tx, token.clone()));
-        // Forwarder: tag this pool's WorkerChange events with the pool.
+        // Forwarder: tag this pool's WorkerChange events with the pool. It
+        // stops at retirement, and `run` drops the events already queued.
         {
             let coord_tx = self.coord_tx.clone();
             let pool = pool.clone();
+            let token = token.clone();
             tokio::spawn(async move {
-                while let Some(wc) = pool_rx.recv().await {
-                    if coord_tx.send((pool.clone(), wc)).await.is_err() {
+                loop {
+                    let wc = tokio::select! {
+                        biased;
+                        _ = token.cancelled() => break,
+                        wc = pool_rx.recv() => match wc {
+                            Some(wc) => wc,
+                            None => break,
+                        },
+                    };
+                    if coord_tx
+                        .send((pool.clone(), token.clone(), wc))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
