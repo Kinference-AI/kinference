@@ -37,14 +37,14 @@ ENV KINFERENCE_VERSION=${KINFERENCE_VERSION}
 
 # The target dir is a cache mount, so the binaries are copied out to /out
 # for the runtime stage.
-RUN --mount=type=cache,id=cargo-$TARGETARCH,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=cargo-$TARGETARCH,target=/src/target \
+RUN --mount=type=cache,id=cargo-registry-$TARGETARCH,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-target-$TARGETARCH,target=/src/target \
     target=$(case "$TARGETARCH" in \
         amd64) echo x86_64-unknown-linux-gnu ;; \
         arm64) echo aarch64-unknown-linux-gnu ;; \
         *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac) \
-    && cargo build --release --bins --target "$target" \
+    && cargo build --locked --release --bins --target "$target" \
     && mkdir -p /out/home \
     && cp "target/$target/release/kinference" /out/ \
     && cp "target/$target/release/kinfctl" /out/ \
