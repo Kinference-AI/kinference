@@ -200,6 +200,7 @@ fn state_tokens_compose_across_the_kinds() {
     r.unresolved = vec![Unresolved {
         kind: "InferenceWorkerSet".into(),
         name: "gone".into(),
+        namespace: "infra".into(),
         uid: None,
         reason: UnresolvedReason::NotFound,
     }];
@@ -519,6 +520,7 @@ fn unresolved_destination_flips_resolved_refs_but_not_accepted() {
         vec![Unresolved {
             kind: "InferenceWorkerSet".into(),
             name: "gone".into(),
+            namespace: "infra".into(),
             uid: None,
             reason: UnresolvedReason::NotFound,
         }],
@@ -759,6 +761,101 @@ async fn a_listed_snapshot_patches_every_object_it_describes() {
         pool.status.is_some(),
         "the recording holds what was patched"
     );
+}
+
+/// A pool in `apps` naming the incomplete provider `infra/openai`, next to an
+/// unrelated `apps/openai`. Returns the provider keys that the writer patched.
+async fn cross_namespace_provider_patches(granted: bool) -> Vec<Key> {
+    use kinference_policy::crd::{
+        BackendObjectRef, Destination, InferencePoolSpec, InferenceProviderSpec, ReferenceGrant,
+        ReferenceGrantFrom, ReferenceGrantSpec, ReferenceGrantTo,
+    };
+    let meta = |name: &str, ns: &str| kube::api::ObjectMeta {
+        name: Some(name.into()),
+        namespace: Some(ns.into()),
+        uid: Some(format!("uid-{ns}-{name}")),
+        ..Default::default()
+    };
+    let pool = InferencePool {
+        metadata: meta("chat", "apps"),
+        spec: InferencePoolSpec {
+            destinations: vec![Destination {
+                kind: Some("InferenceProvider".into()),
+                name: Some("openai".into()),
+                namespace: Some("infra".into()),
+                ..Default::default()
+            }],
+            policy_ref: None,
+        },
+        status: None,
+    };
+    let provider = |ns: &str| InferenceProvider {
+        metadata: meta("openai", ns),
+        spec: InferenceProviderSpec {
+            backend_ref: Some(BackendObjectRef {
+                name: Some("openai-backend".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        status: None,
+    };
+    let grants: Vec<Arc<ReferenceGrant>> = granted
+        .then(|| {
+            Arc::new(ReferenceGrant {
+                metadata: meta("g", "infra"),
+                spec: ReferenceGrantSpec {
+                    from: vec![ReferenceGrantFrom {
+                        group: Some("kinference.buoyant.io".into()),
+                        kind: Some("InferencePool".into()),
+                        namespace: Some("apps".into()),
+                    }],
+                    to: vec![ReferenceGrantTo {
+                        group: Some("kinference.buoyant.io".into()),
+                        kind: Some("InferenceProvider".into()),
+                        name: None,
+                    }],
+                },
+            })
+        })
+        .into_iter()
+        .collect();
+    let index = kinference_policy::resolve::resolve(
+        &[Arc::new(pool.clone())],
+        &[],
+        &[],
+        &[Arc::new(provider("infra")), Arc::new(provider("apps"))],
+        &[],
+        &grants,
+        &Default::default(),
+        &Default::default(),
+    );
+    let api = Recorded::default()
+        .with([pool])
+        .with([provider("infra"), provider("apps")]);
+    let ((w, _tx), _) = writer_over(api.clone(), true);
+    w.store.publish(Arc::new(index));
+    w.reconcile_once().await;
+    patched_keys(&api)
+        .into_iter()
+        .filter(|k| k != &key::<InferencePool>("apps", "chat"))
+        .collect()
+}
+
+/// A refused provider in another namespace gets its status in its own
+/// namespace, never on a same-named provider in the pool's.
+#[tokio::test]
+async fn a_cross_namespace_provider_is_patched_in_its_own_namespace() {
+    assert_eq!(
+        cross_namespace_provider_patches(true).await,
+        vec![key::<InferenceProvider>("infra", "openai")]
+    );
+}
+
+/// A provider that the pool may not reach is reported on the pool alone.
+#[tokio::test]
+async fn an_ungranted_provider_is_not_patched() {
+    assert_eq!(cross_namespace_provider_patches(false).await, vec![]);
 }
 
 #[tokio::test]
