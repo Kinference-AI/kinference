@@ -376,34 +376,13 @@ fn in_group(v: &Value, group: &str) -> bool {
 
 /// Parse a multi-document YAML stream into JSON values.
 ///
-/// The parser refuses more than 32 consecutive comment lines before a list
-/// entry, a fixed limit that well-commented manifests hit. On that error,
-/// parse again with every full-line comment blanked (not deleted, so line
-/// numbers still match). Blank lines don't end a block scalar, so nothing
-/// structural changes.
+/// The parser buffers at most 32 comment events while it looks ahead, a
+/// limit that well-commented manifests hit. With comment emission off, the
+/// parser still validates comments but buffers none.
 fn parse_yaml(text: &str) -> Result<Vec<Value>, String> {
-    let err = match serde_saphyr::from_multiple(text) {
-        Ok(docs) => return Ok(docs),
-        Err(e) if e.to_string().contains("too many consecutive comments") => {
-            let blanked: String = text
-                .lines()
-                .map(|l| {
-                    if l.trim_start().starts_with('#') {
-                        ""
-                    } else {
-                        l
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            match serde_saphyr::from_multiple(&blanked) {
-                Ok(docs) => return Ok(docs),
-                Err(e) => e,
-            }
-        }
-        Err(e) => e,
-    };
-    Err(describe_parse_error(&err))
+    let mut options = serde_saphyr::Options::default();
+    options.emit_comments = false;
+    serde_saphyr::from_multiple_with_options(text, options).map_err(|e| describe_parse_error(&e))
 }
 
 /// A parse error, worded for whoever is running kinfctl.
