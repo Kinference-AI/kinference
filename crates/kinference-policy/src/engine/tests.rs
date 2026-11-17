@@ -411,6 +411,21 @@ fn minimize_picks_the_lowest_objective() {
     }
 }
 
+/// A NaN objective ranks last and never wins.
+#[test]
+fn a_nan_objective_ranks_last() {
+    let p = policy(json!({"rules": [{"name": "r", "route": {
+        "select": [{"minimize": "PredictedTTFT"}]}}]}));
+    let mut candidates: Vec<Candidate> = (0..40)
+        .map(|i| cand(&format!("nan-{i}"), "m", f32::NAN))
+        .collect();
+    candidates.insert(20, cand("b", "m", 120.0));
+    match evaluate(route_of(&p), Some("r"), &req(), candidates) {
+        Outcome::Chosen { candidate, .. } => assert_eq!(candidate.backend, "b"),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn first_tier_with_a_survivor_wins_outright() {
     let p = policy(json!({"rules": [{"name": "r", "route": {

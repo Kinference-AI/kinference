@@ -100,3 +100,36 @@ fn sample_is_none_until_the_first_scrape() {
     );
     assert_eq!(reg.sample(7).map(|s| s.waiting_mean), Some(2.5));
 }
+
+/// A non-finite KV cache usage reads as a fraction in `[0, 1]`.
+#[tokio::test]
+async fn a_non_finite_kv_cache_usage_is_clamped() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for (reported, want) in [("+Inf", 1.0), ("NaN", 0.0), ("0.25", 0.25)] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/metrics", listener.local_addr().unwrap());
+        let body = format!("vllm:kv_cache_usage_perc {reported}\n");
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+        let sample = scrape_once(
+            &reqwest::Client::new(),
+            &url,
+            &ALL_NAMES,
+            "",
+            "w",
+            false,
+            &mut false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(sample.kv_cache_usage, want, "{reported}");
+    }
+}
