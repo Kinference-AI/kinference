@@ -27,6 +27,18 @@ required_fields() {
     /^ *required: *true/ { print label }' "../ISSUE_TEMPLATE/$1"
 }
 
+# Rewrites a line that holds only a form field's label in bold into
+# that field's `### <field>` heading. An issue filed through the API
+# often marks its fields that way.
+bold_to_headings() {
+  local forms
+  read -ra forms <<< "$FORMS"
+  awk '
+    FILENAME != "-" { if (sub(/^ *label: */, "")) heading["**" $0 "**"] = "### " $0; next }
+    { line = $0; sub(/[ \t]+$/, "", line); print (line in heading) ? heading[line] : $0 }
+  ' "${forms[@]/#/../ISSUE_TEMPLATE/}" -
+}
+
 # Prints the form whose label the issue carries. GitHub drops a label
 # that an account without push access sets through the API, so an
 # issue without a form's label gets the form whose required headings
@@ -56,7 +68,7 @@ check_issue() {
   state=$(jq -r .state <<< "$issue")
   author=$(jq -r .user.login <<< "$issue")
   labels=$(jq -r '.labels[].name' <<< "$issue")
-  body=$(jq -r '.body // ""' <<< "$issue" | tr -d '\r' | strip_comments)
+  body=$(jq -r '.body // ""' <<< "$issue" | tr -d '\r' | strip_comments | bold_to_headings)
 
   # Rule: came through a form.
   form=$(form_of "$labels" "$body")
