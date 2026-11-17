@@ -735,7 +735,7 @@ fn manifests_joined_without_a_separator_get_a_hint() {
     let err = check(&[input("x", repeated)], &opts())
         .unwrap_err()
         .to_string();
-    assert!(err.contains("duplicate mapping key: name"), "{err}");
+    assert!(err.contains("duplicate mapping key `name`"), "{err}");
     assert!(!err.contains("hint:"), "{err}");
     assert!(!err.contains("DuplicateKeyPolicy"), "{err}");
 }
@@ -794,8 +794,8 @@ fn every_demo_policy_passes_the_spec_checks_alone() {
     assert_eq!(checked, 5, "the demo policies changed?");
 }
 
-/// The YAML parser refuses more than 32 comment lines in a row before a list
-/// entry; 40 above a policy rule still parses.
+/// The YAML parser buffers at most 32 comment events by default; 40 comment
+/// lines above a policy rule still parse.
 #[test]
 fn a_long_comment_block_does_not_stop_the_parse() {
     let comments: String = (0..40)
