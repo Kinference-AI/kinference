@@ -11,7 +11,8 @@ kinference-policy.workspace = true
 kinference-fleet.workspace = true
 dynamo-kv-router.workspace = true
 tonic.workspace = true
-prost = "0.13"
+prost = "0.14"
+tonic-prost = "0.14"
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tokio-util.workspace = true
 tokio-stream = "0.1"
@@ -45,7 +46,7 @@ tempfile.workspace = true
 tracing-subscriber = { version = "0.3", features = ["json"] }
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-prost-build = "0.14"
 # Bundled `protoc`, so no system protobuf compiler is needed.
 protoc-bin-vendored = "3"
 
