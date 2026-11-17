@@ -9,36 +9,39 @@ each module owns; this page says only when each module runs.
 
 `server::run` does the following, in this order.
 
-1. Load and validate the config from the path on the command line. This
-   is the only read of the environment.
-2. Bind the gRPC listener, so that a port clash fails before anything else
+1. Start logging. `RUST_LOG`, `KINFERENCE_LOG_FORMAT` and `NO_COLOR`
+   configure the subscriber.
+2. Load and validate the config from the path on the command line. Apart
+   from the logging variables, this step is the only read of the
+   environment.
+3. Bind the gRPC listener, so that a port clash fails before anything else
    starts.
-3. Create the one Prometheus registry. Every subsystem below registers its
+4. Create the one Prometheus registry. Every subsystem below registers its
    families in it.
-4. Create the policy store, if policy is enabled, and the store of
+5. Create the policy store, if policy is enabled, and the store of
    provider health. The policy store starts empty, and `/readyz` reports
    not ready until the control plane has filled it.
-5. Build the discovery factory from the controller crate. Through the
+6. Build the discovery factory from the controller crate. Through the
    factory, the fleet gets Kubernetes discovery without holding a client.
-6. Call `Fleet::new`, which builds the pool registry, the model index, the
+7. Call `Fleet::new`, which builds the pool registry, the model index, the
    scrape registry, the coordinator and the pool manager. Nothing runs
    yet; the handles exist so that the server can build the router against
    them.
-7. Call `KinferenceService::start`, which builds the tokenizer, the scoring
+8. Call `KinferenceService::start`, which builds the tokenizer, the scoring
    reads over the fleet handles, the body store and the observations. It
    also spawns the two sweeps that expire bodies and observations past
    their TTL.
-8. Call `Fleet::start`, which materializes the worker sets that the config
+9. Call `Fleet::start`, which materializes the worker sets that the config
    declares and runs the coordinator loop. From here on, the coordinator
    can add workers.
-9. Call `controller::start`. It connects to the API server and runs the
-   worker-set watch (or, with Kubernetes off, only the reap sweep), then
-   the CRD watch, the elector, and the status and binding writers. It
-   returns a handle, and the server awaits the handle's `shutdown` at the
-   end.
-10. Call `admin::spawn`, if the config sets an admin address. The admin
+10. Call `controller::start`. It connects to the API server and runs the
+    worker-set watch (or, with Kubernetes off, only the reap sweep), then
+    the CRD watch, the elector, and the status and binding writers. It
+    returns a handle, and the server awaits the handle's `shutdown` at the
+    end.
+11. Call `admin::spawn`, if the config sets an admin address. The admin
     listener serves `/readyz`, `/metrics` and the read-only policy API.
-11. Log that kinference is ready and serve the `Picker` service until
+12. Log that kinference is ready and serve the `Picker` service until
     SIGTERM or SIGINT arrives.
 
 Shutdown runs in reverse. The signal stops the gRPC server from accepting
