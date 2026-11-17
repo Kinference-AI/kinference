@@ -45,6 +45,7 @@ pub(crate) struct ServiceBuilder {
     providers: Vec<(String, serde_json::Value)>,
     policy: Policy,
     render: Render,
+    body_bytes: u64,
 }
 
 impl ServiceBuilder {
@@ -55,6 +56,7 @@ impl ServiceBuilder {
             policy: Policy::ListedEmpty,
             // Two full blocks at the test pools' block size of 16.
             render: Render::Tokens((1..=32).collect()),
+            body_bytes: 1 << 20,
         }
     }
 
@@ -92,6 +94,12 @@ impl ServiceBuilder {
 
     pub(crate) fn render(mut self, render: Render) -> Self {
         self.render = render;
+        self
+    }
+
+    /// Both body budgets, for the request and for the server.
+    pub(crate) fn body_bytes(mut self, bytes: u64) -> Self {
+        self.body_bytes = bytes;
         self
     }
 
@@ -222,7 +230,11 @@ impl ServiceBuilder {
             Scoring::new(pool_registry, models, scrape),
             tokenizer,
             crate::body_store::Bodies::new(
-                Arc::new(crate::body_store::BodyStore::new(1 << 20, 1 << 20, ttl)),
+                Arc::new(crate::body_store::BodyStore::new(
+                    self.body_bytes,
+                    self.body_bytes,
+                    ttl,
+                )),
                 ttl,
                 prom.clone(),
             ),
