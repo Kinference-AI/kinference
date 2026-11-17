@@ -510,6 +510,13 @@ pub fn rejection_index(rejections: &[super::rejection::Rejection]) -> RejectionI
         .collect()
 }
 
+/// `objs` sorted by namespace and name.
+fn sorted<K: Resource>(objs: &[Arc<K>]) -> Vec<Arc<K>> {
+    let mut v = objs.to_vec();
+    v.sort_by_cached_key(|o| (o.namespace(), o.name_any()));
+    v
+}
+
 /// Rebuild the whole index from the current contents of the CRD stores.
 ///
 /// Takes no Services; the result carries an unlisted, empty `Service` view
@@ -525,6 +532,12 @@ pub fn resolve(
     pools_by_key: &PoolIndex,
     rejections: &RejectionIndex,
 ) -> PolicyIndex {
+    // Destinations, unresolved entries and parents follow input order, and a
+    // reflector store iterates in hash order. Sorting makes the snapshot, and
+    // so the status that the writer compares, depend only on the contents.
+    let (pools, policies, worker_sets) = (&sorted(pools), &sorted(policies), &sorted(worker_sets));
+    let (providers, routes) = (&sorted(providers), &sorted(routes));
+
     // The caller only resolves once every store has listed.
     let mut index = PolicyIndex {
         listed: true,

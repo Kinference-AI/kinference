@@ -292,6 +292,59 @@ fn empty_destinations_means_every_worker_set_in_the_namespace() {
     assert_eq!(idx.lookup("infra", "chat").unwrap().destinations.len(), 2);
 }
 
+/// The snapshot doesn't depend on the order of the inputs.
+#[test]
+fn input_order_does_not_change_the_snapshot() {
+    let route = |name: &str, gateway: &str| {
+        Arc::new(HTTPRoute {
+            metadata: meta(name, "infra"),
+            spec: serde_json::from_value(serde_json::json!({
+                "parentRefs": [{"kind": "Gateway", "name": gateway}],
+                "rules": [{"backendRefs": [
+                    {"group": "kinference.buoyant.io", "kind": "InferencePool", "name": "chat"}]}]
+            }))
+            .unwrap(),
+        })
+    };
+    let pools_in = [pool("chat", vec![], None)];
+    let mut sets = vec![
+        worker_set("a", "vllm-h100", &[]),
+        worker_set("b", "vllm-h100", &[]),
+        worker_set("unbound", "nothing-serves-this", &[]),
+        worker_set("unbound-too", "nothing-serves-this", &[]),
+    ];
+    let mut routes = vec![route("r1", "gw-1"), route("r2", "gw-2")];
+    let snapshot = |sets: &[Arc<InferenceWorkerSet>], routes: &[Arc<HTTPRoute>]| {
+        let idx = resolve_local(
+            &pools_in,
+            &[],
+            sets,
+            routes,
+            &pools(),
+            &RejectionIndex::new(),
+        );
+        let p = idx.lookup("infra", "chat").unwrap();
+        (
+            p.destinations
+                .iter()
+                .map(|d| d.name().to_string())
+                .collect::<Vec<_>>(),
+            p.unresolved
+                .iter()
+                .map(|u| u.name.clone())
+                .collect::<Vec<_>>(),
+            p.parents.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
+        )
+    };
+    let forward = snapshot(&sets, &routes);
+    sets.reverse();
+    routes.reverse();
+    assert_eq!(snapshot(&sets, &routes), forward);
+    assert_eq!(forward.0, ["a", "b"]);
+    assert_eq!(forward.1, ["unbound", "unbound-too"]);
+    assert_eq!(forward.2, ["gw-1", "gw-2"]);
+}
+
 #[test]
 fn selector_destination_matches_by_label() {
     let dest = Destination {
