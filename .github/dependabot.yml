@@ -13,6 +13,10 @@ updates:
       # with two k8s-openapi versions and the build fails.
       kube:
         patterns: ["kube", "kube-*", "k8s-openapi"]
+      # Each tonic release pins one prost minor version, so the two
+      # crates move together for the same reason.
+      tonic:
+        patterns: ["tonic", "tonic-*", "prost", "prost-*"]
       cargo:
         update-types: [minor, patch]
 
