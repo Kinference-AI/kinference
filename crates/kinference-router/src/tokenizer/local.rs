@@ -488,7 +488,7 @@ fn render_chat_template(
             op: "parse",
             source,
         })?;
-    tmpl.render(serde_json::Value::Object(ctx))
+    tmpl.render(minijinja::value::Serde(serde_json::Value::Object(ctx)))
         .map_err(|source| Error::Template {
             op: "render",
             source,
