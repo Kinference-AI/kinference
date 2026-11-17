@@ -43,7 +43,7 @@ zmq = "0.10"
 reqwest = { version = "0.12", default-features = false }
 dashmap = "6"
 prometheus-parse = "0.2"
-prometheus = { version = "0.13", default-features = false }
+prometheus = { version = "0.14", default-features = false }
 tonic = "0.14"
 futures = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
