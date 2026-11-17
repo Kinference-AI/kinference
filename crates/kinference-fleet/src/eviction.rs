@@ -1,13 +1,12 @@
 //! Worker eviction signaling.
 //!
 //! A worker is torn down when discovery removes it, or on a homogeneity
-//! violation: ingest sees a block size other than the pool's, or the metrics
-//! poller sees a `/v1/models` list that disagrees with the pool's canonical
-//! set.
+//! violation: the metrics poller sees a `/v1/models` list that disagrees with
+//! the pool's canonical set.
 //!
-//! The ingest listener and metrics poller request eviction by sending an
-//! [`EvictionRequest`]; `fleet::coordinator` owns the receiver and does the
-//! teardown, keeping lifecycle logic in one place.
+//! The metrics poller requests eviction by sending an [`EvictionRequest`];
+//! `fleet::coordinator` owns the receiver and does the teardown, keeping
+//! lifecycle logic in one place.
 
 use tokio::sync::mpsc;
 
@@ -21,9 +20,6 @@ pub struct EvictionRequest {
 /// Why a worker is being evicted.
 #[derive(Debug, Clone)]
 pub enum EvictionReason {
-    /// The engine's KV events use a block size other than the pool's
-    /// `kv_block_size`.
-    BlockSizeMismatch { expected: u32, observed: u32 },
     /// The worker's `/v1/models` list differs from the canonical set pinned by
     /// the pool's first non-empty report.
     ModelMismatch {
@@ -39,7 +35,6 @@ impl EvictionReason {
     /// not reach a label.
     pub fn as_label(&self) -> &'static str {
         match self {
-            EvictionReason::BlockSizeMismatch { .. } => "block_size_mismatch",
             EvictionReason::ModelMismatch { .. } => "model_mismatch",
         }
     }
@@ -48,10 +43,6 @@ impl EvictionReason {
 impl std::fmt::Display for EvictionReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EvictionReason::BlockSizeMismatch { expected, observed } => write!(
-                f,
-                "engine block size {observed} differs from kvBlockSize {expected}"
-            ),
             EvictionReason::ModelMismatch { expected, observed } => write!(
                 f,
                 "served models {observed:?} differ from the worker set's {expected:?}"

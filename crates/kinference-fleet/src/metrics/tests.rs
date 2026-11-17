@@ -41,24 +41,32 @@ fn closed_label_sets_are_seeded_at_zero() {
 #[test]
 fn worker_evictions_are_counted_by_reason() {
     let (m, registry) = metrics();
-    m.record_worker_eviction("block_size_mismatch");
-    m.record_worker_eviction("block_size_mismatch");
+    m.record_worker_eviction("model_mismatch");
     m.record_worker_eviction("model_mismatch");
     let out = render(&registry);
     assert!(
         has_line(
             &out,
-            "kinference_worker_evictions_total{reason=\"block_size_mismatch\"} 2"
+            "kinference_worker_evictions_total{reason=\"model_mismatch\"} 2"
         ),
         "{out}"
     );
-    assert!(
-        has_line(
-            &out,
-            "kinference_worker_evictions_total{reason=\"model_mismatch\"} 1"
-        ),
-        "{out}"
-    );
+}
+
+/// Skipped KV events count by worker set and reason.
+#[test]
+fn skipped_kv_events_are_counted_by_workerset_and_reason() {
+    let (m, registry) = metrics();
+    m.record_kv_event_skipped("set-a", "block_size_mismatch");
+    m.record_kv_event_skipped("set-a", "block_size_mismatch");
+    m.record_kv_event_skipped("set-b", "unknown_kind");
+    let out = render(&registry);
+    for line in [
+        "kinference_kv_events_skipped_total{reason=\"block_size_mismatch\",workerset=\"set-a\"} 2",
+        "kinference_kv_events_skipped_total{reason=\"unknown_kind\",workerset=\"set-b\"} 1",
+    ] {
+        assert!(has_line(&out, line), "missing `{line}`:\n{out}");
+    }
 }
 
 /// Each event kind counts once; only stored and removed move the block totals.
@@ -86,33 +94,24 @@ fn index_events_count_by_kind_and_blocks_by_direction() {
 #[test]
 fn eviction_reason_labels_match_the_enum() {
     use crate::eviction::EvictionReason as E;
-    let all = [
-        E::BlockSizeMismatch {
-            expected: 256,
-            observed: 64,
-        },
-        E::ModelMismatch {
-            expected: vec!["a".into()],
-            observed: vec!["b".into()],
-        },
-    ];
+    let all = [E::ModelMismatch {
+        expected: vec!["a".into()],
+        observed: vec!["b".into()],
+    }];
     for v in &all {
         match v {
-            E::BlockSizeMismatch { .. } | E::ModelMismatch { .. } => {}
+            E::ModelMismatch { .. } => {}
         }
     }
     let from_enum: Vec<&str> = all.iter().map(|r| r.as_label()).collect();
     assert_eq!(from_enum, EVICTION_REASONS);
-    // Display carries the numbers; the label must not.
+    // Display names the models; the label must not.
     let d = all[0].to_string();
     assert!(
-        d.contains("256") && d.contains("64"),
+        d.contains("\"a\"") && d.contains("\"b\""),
         "Display should name both: {d}"
     );
-    assert!(
-        !all[0].as_label().contains("256"),
-        "label must be value-free"
-    );
+    assert_eq!(all[0].as_label(), "model_mismatch");
 }
 
 /// Ties [`INDEX_EVENT_KINDS`] to its enum via an exhaustive `match`.

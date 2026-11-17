@@ -1,63 +1,220 @@
 use super::*;
 
-// ─── BlockSizeGuard debounce + sanity bound ─────────────────────
+use std::sync::Arc;
 
-#[test]
-fn matching_block_size_is_healthy() {
-    let mut g = BlockSizeGuard::new(16);
-    assert_eq!(g.classify(16), BlockSizeVerdict::Healthy);
+use dynamo_kv_router::zmq_wire::{BlockHashValue, KvCacheSpecKind};
+use prometheus::{Encoder, Registry, TextEncoder};
+use tokio_util::sync::CancellationToken;
+
+use crate::discovery::WorkerConfig;
+use crate::eviction::{self, EvictionRx};
+use crate::metrics::FleetMetrics;
+use crate::models::ModelIndex;
+use crate::pool::test_pool;
+
+/// A worker context in the worker set "set-a", whose `kvBlockSize` is 16.
+fn context() -> (WorkerContext, Registry, EvictionRx) {
+    let pool = test_pool("set-a");
+    let registry = Registry::new();
+    let (eviction_tx, evictions) = eviction::channel();
+    let ctx = WorkerContext {
+        cfg: WorkerConfig {
+            worker_id_str: "w-1".into(),
+            worker_id_num: 1,
+            ..Default::default()
+        },
+        endpoint_key: "10.0.0.1:8000".into(),
+        pool_id: pool.id,
+        pool_name: pool.name.clone(),
+        block_size: pool.block_size,
+        registry: pool.registry.clone(),
+        indexer: pool.indexer.clone(),
+        inflight_prefixes: pool.inflight_prefixes.clone(),
+        prom: Arc::new(FleetMetrics::new(&registry)),
+        models: Arc::new(ModelIndex::new()),
+        eviction_tx,
+        cancel: CancellationToken::new(),
+    };
+    (ctx, registry, evictions)
 }
 
-#[test]
-fn implausible_value_is_a_glitch_never_evicts() {
-    // A misframed event with block_size=1568.
-    let mut g = BlockSizeGuard::new(16);
-    // Even repeated, an out-of-bounds value never trips eviction and
-    // never advances the debounce counter.
-    for _ in 0..10 {
-        assert_eq!(g.classify(1568), BlockSizeVerdict::Glitch);
+/// One `BlockStored` event with a single block of `block_size` tokens.
+fn stored(hash: u64, block_size: usize, kind: Option<KvCacheSpecKind>) -> RawKvEvent {
+    RawKvEvent::BlockStored {
+        block_hashes: vec![BlockHashValue::Unsigned(hash)],
+        parent_block_hash: None,
+        token_ids: (0..block_size as u32).collect(),
+        block_size,
+        medium: None,
+        lora_name: None,
+        block_mm_infos: None,
+        is_eagle: None,
+        group_idx: None,
+        kv_cache_spec_kind: kind,
+        kv_cache_spec_sliding_window: None,
     }
-    assert_eq!(g.consecutive, 0);
-    assert_eq!(g.classify(0), BlockSizeVerdict::Glitch);
 }
 
-#[test]
-fn single_plausible_mismatch_does_not_evict() {
-    let mut g = BlockSizeGuard::new(16);
-    assert_eq!(g.classify(32), BlockSizeVerdict::Pending { consecutive: 1 });
+fn removed(hash: u64) -> RawKvEvent {
+    RawKvEvent::BlockRemoved {
+        block_hashes: vec![BlockHashValue::Unsigned(hash)],
+        medium: None,
+        group_idx: None,
+        kv_cache_spec_kind: None,
+        kv_cache_spec_sliding_window: None,
+    }
 }
 
-#[test]
-fn sustained_same_mismatch_evicts_at_threshold() {
-    let mut g = BlockSizeGuard::new(16);
-    assert_eq!(g.classify(32), BlockSizeVerdict::Pending { consecutive: 1 });
-    assert_eq!(g.classify(32), BlockSizeVerdict::Pending { consecutive: 2 });
-    // Third consecutive identical mismatch (threshold = 3) → evict.
-    assert_eq!(g.classify(32), BlockSizeVerdict::Evict);
+async fn apply(ctx: &WorkerContext, memory: &mut WorkerMemory, events: Vec<RawKvEvent>) {
+    let mut state = ListenerState {
+        cursor: CursorState::Initial,
+        normalizer: ZmqEventNormalizer::new(ctx.block_size),
+        memory,
+        warned: ListenerWarnings::default(),
+    };
+    let batch = KvEventBatch {
+        ts: 0.0,
+        events,
+        data_parallel_rank: None,
+    };
+    apply_batch(ctx, &mut state, 0, batch).await;
 }
 
-#[test]
-fn a_matching_event_resets_the_debounce() {
-    let mut g = BlockSizeGuard::new(16);
-    g.classify(32);
-    g.classify(32);
-    assert_eq!(g.classify(16), BlockSizeVerdict::Healthy);
-    // Counter reset: the next mismatch starts over at 1, not 3.
-    assert_eq!(g.classify(32), BlockSizeVerdict::Pending { consecutive: 1 });
+fn render(registry: &Registry) -> String {
+    let mut buf = Vec::new();
+    TextEncoder::new()
+        .encode(&registry.gather(), &mut buf)
+        .unwrap();
+    String::from_utf8(buf).unwrap()
 }
 
-#[test]
-fn varied_garbage_never_accumulates_to_eviction() {
-    // Distinct plausible mismatching values in a row shouldn't evict:
-    // a real misconfig reports one consistent wrong value.
-    let mut g = BlockSizeGuard::new(16);
-    assert_eq!(g.classify(32), BlockSizeVerdict::Pending { consecutive: 1 });
-    assert_eq!(g.classify(64), BlockSizeVerdict::Pending { consecutive: 1 });
-    assert_eq!(
-        g.classify(128),
-        BlockSizeVerdict::Pending { consecutive: 1 }
-    );
-    // The counter tracks the current value only; nothing reached 3.
+fn has_line(registry: &Registry, line: &str) -> bool {
+    render(registry).lines().any(|l| l == line)
+}
+
+/// Ingest skips and counts events at another block size, requests no
+/// eviction, and indexes the matching event that follows.
+#[tokio::test]
+async fn a_block_size_mismatch_is_skipped_and_counted() {
+    let (ctx, registry, mut evictions) = context();
+    let mut memory = WorkerMemory::default();
+    let events = vec![
+        stored(1, 32, None),
+        stored(2, 32, None),
+        stored(3, 32, None),
+        stored(4, 32, None),
+        stored(5, 16, None),
+    ];
+    apply(&ctx, &mut memory, events).await;
+
+    assert!(has_line(
+        &registry,
+        "kinference_kv_events_skipped_total{reason=\"block_size_mismatch\",workerset=\"set-a\"} 4"
+    ));
+    assert!(has_line(
+        &registry,
+        "kinference_index_events_total{kind=\"stored\"} 1"
+    ));
+    assert!(evictions.try_recv().is_err());
+}
+
+/// An event of a non-main attention group is skipped by design, so the
+/// skip counter doesn't count it.
+#[tokio::test]
+async fn a_non_main_attention_event_is_not_counted() {
+    let (ctx, registry, _evictions) = context();
+    let mut memory = WorkerMemory::default();
+    let events = vec![stored(1, 4, Some(KvCacheSpecKind::SlidingWindow))];
+    apply(&ctx, &mut memory, events).await;
+
+    assert!(!render(&registry).contains("kinference_kv_events_skipped_total{"));
+    assert!(memory.warned_block_sizes.is_empty());
+}
+
+/// An event of an attention group that ingest can't classify counts under
+/// the normalizer's reason.
+#[tokio::test]
+async fn an_unknown_kind_event_is_counted_under_its_own_reason() {
+    let (ctx, registry, _evictions) = context();
+    let mut memory = WorkerMemory::default();
+    let events = vec![stored(1, 16, Some(KvCacheSpecKind::Unknown))];
+    apply(&ctx, &mut memory, events).await;
+
+    assert!(has_line(
+        &registry,
+        "kinference_kv_events_skipped_total{reason=\"unknown_kind\",workerset=\"set-a\"} 1"
+    ));
+}
+
+/// Each mismatching block size is recorded for the WARN line once, up to
+/// the cap.
+#[tokio::test]
+async fn each_mismatching_block_size_warns_once_up_to_the_cap() {
+    let (ctx, _registry, _evictions) = context();
+    let mut memory = WorkerMemory::default();
+    apply(
+        &ctx,
+        &mut memory,
+        vec![
+            stored(1, 32, None),
+            stored(2, 32, None),
+            stored(3, 64, None),
+        ],
+    )
+    .await;
+    assert_eq!(memory.warned_block_sizes, [32, 64]);
+
+    let garbage = (100..120).map(|n| stored(n, n as usize, None)).collect();
+    apply(&ctx, &mut memory, garbage).await;
+    assert_eq!(memory.warned_block_sizes.len(), MAX_WARNED_BLOCK_SIZES);
+    assert!(memory.warned_block_size_cap);
+}
+
+/// An implausible block size counts under its own reason and takes no slot
+/// in the list of warned sizes.
+#[tokio::test]
+async fn an_implausible_block_size_is_counted_under_its_own_reason() {
+    let (ctx, registry, _evictions) = context();
+    let mut memory = WorkerMemory::default();
+    apply(
+        &ctx,
+        &mut memory,
+        vec![stored(1, 1568, None), stored(2, 0, None)],
+    )
+    .await;
+
+    assert!(has_line(
+        &registry,
+        "kinference_kv_events_skipped_total{reason=\"implausible_block_size\",workerset=\"set-a\"} 2"
+    ));
+    assert!(memory.warned_implausible_block_size);
+    assert!(memory.warned_block_sizes.is_empty());
+}
+
+/// Ingest skips a removal from a worker that has no indexed block, and
+/// applies a removal once a stored block is indexed, across a reconnect.
+#[tokio::test]
+async fn a_removal_is_skipped_until_a_stored_block_is_indexed() {
+    let (ctx, registry, _evictions) = context();
+    let mut memory = WorkerMemory::default();
+    apply(&ctx, &mut memory, vec![stored(1, 32, None), removed(1)]).await;
+
+    assert!(has_line(
+        &registry,
+        "kinference_kv_events_skipped_total{reason=\"nothing_stored\",workerset=\"set-a\"} 1"
+    ));
+    assert!(has_line(
+        &registry,
+        "kinference_index_blocks_removed_total 0"
+    ));
+
+    apply(&ctx, &mut memory, vec![stored(2, 16, None)]).await;
+    // A second `apply` builds a new listener state, as a reconnect does.
+    apply(&ctx, &mut memory, vec![removed(2)]).await;
+    assert!(has_line(
+        &registry,
+        "kinference_index_blocks_removed_total 1"
+    ));
 }
 
 #[test]

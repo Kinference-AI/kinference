@@ -150,9 +150,9 @@ async fn evict_cancels_the_tasks_and_drops_the_state() {
         .evict_worker(
             &pool,
             1,
-            Some(EvictionReason::BlockSizeMismatch {
-                expected: 16,
-                observed: 32,
+            Some(EvictionReason::ModelMismatch {
+                expected: vec!["llama".into()],
+                observed: vec!["mistral".into()],
             }),
         )
         .await;

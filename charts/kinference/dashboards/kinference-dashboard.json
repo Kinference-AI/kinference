@@ -996,7 +996,7 @@
       "id": 67,
       "type": "timeseries",
       "title": "Worker evictions",
-      "description": "Cumulative workers kinference evicted ITSELF, since this process started — the raw counter, not a rate, so the line only ever steps up and a drop to zero means kinference restarted.\n\nAn eviction is not a pod going away. A pod that simply disappears arrives as a discovery removal, is logged \"worker removed\" at INFO, and is deliberately NOT counted here — otherwise every rolling restart would read as a fault. This counts only the cases where the worker was discovered and healthy but disagreed with its pool about something the pool cannot vary per worker, so it had to be dropped to keep the rest serving on coherent assumptions.\n\nANY NON-ZERO VALUE IS A CONFIG MISMATCH, not a transient. `block_size_mismatch` means the engine publishes a different tokens-per-block than the worker set's `kvBlockSize` — kinference waits for three consecutive mismatched events before acting, so this is not a bad frame. `model_mismatch` means the worker's /v1/models disagrees with the pool's canonical set.\n\nThe eviction is silent in every other panel: the worker vanishes from `kinference_workers` and the fleet just looks smaller. The WARN log carries both mismatched values and names the fix.",
+      "description": "Cumulative workers kinference evicted ITSELF, since this process started — the raw counter, not a rate, so the line only ever steps up and a drop to zero means kinference restarted.\n\nAn eviction is not a pod going away. A pod that simply disappears arrives as a discovery removal, is logged \"worker removed\" at INFO, and is deliberately NOT counted here — otherwise every rolling restart would read as a fault. This counts only the cases where the worker was discovered and healthy but disagreed with its pool about something the pool cannot vary per worker, so it had to be dropped to keep the rest serving on coherent assumptions.\n\nANY NON-ZERO VALUE IS A CONFIG MISMATCH, not a transient. `model_mismatch` means the worker's /v1/models disagrees with the pool's canonical set.\n\nThe eviction is silent in every other panel: the worker vanishes from `kinference_workers` and the fleet just looks smaller. The WARN log carries both mismatched values and names the fix.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -1040,21 +1040,6 @@
           }
         },
         "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "block_size_mismatch"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#D32F2F"
-                }
-              }
-            ]
-          },
           {
             "matcher": {
               "id": "byName",

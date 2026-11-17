@@ -75,7 +75,7 @@ const INDEX_EVENT_KINDS: [&str; 3] = ["stored", "removed", "cleared"];
 ///
 /// Only evictions kinference decided on; ordinary discovery removals are not
 /// counted, so a rolling restart doesn't look like a fault.
-const EVICTION_REASONS: [&str; 2] = ["block_size_mismatch", "model_mismatch"];
+const EVICTION_REASONS: [&str; 1] = ["model_mismatch"];
 
 /// One KV-cache event kind, as the `kind` label on
 /// `kinference_index_events_total`.
@@ -102,6 +102,9 @@ pub struct FleetMetrics {
     worker_evictions: IntCounterVec,
     /// `kinference_index_events_total{kind}`: KV events applied, by kind.
     index_events: IntCounterVec,
+    /// `kinference_kv_events_skipped_total{workerset, reason}`: KV events
+    /// that ingest didn't index.
+    kv_events_skipped: IntCounterVec,
     /// `kinference_index_blocks_stored_total` / `_removed_total`: block churn.
     index_blocks_stored: IntCounter,
     index_blocks_removed: IntCounter,
@@ -130,6 +133,21 @@ impl FleetMetrics {
              removed, cleared)",
             &["kind"],
         );
+        let kv_events_skipped = int_counter_vec(
+            registry,
+            "kinference_kv_events_skipped_total",
+            "KV-cache events that ingest skipped instead of indexing, by \
+             worker set and reason. block_size_mismatch means the event's \
+             block size differs from the worker set's kvBlockSize, so the \
+             router predicts no prefix reuse from that event. \
+             implausible_block_size means a block size that no engine uses \
+             for attention blocks. nothing_stored means a removal from a \
+             worker that has no indexed block. unknown_kind and \
+             unlearned_group_idx mean an event whose attention group \
+             ingest could not classify. Events of non-main attention \
+             groups are not counted",
+            &["workerset", "reason"],
+        );
         let index_blocks_stored = int_counter(
             registry,
             "kinference_index_blocks_stored_total",
@@ -149,6 +167,7 @@ impl FleetMetrics {
         Self {
             worker_evictions,
             index_events,
+            kv_events_skipped,
             index_blocks_stored,
             index_blocks_removed,
         }
@@ -160,6 +179,14 @@ impl FleetMetrics {
     /// label and the WARN log cannot name different things.
     pub fn record_worker_eviction(&self, reason: &str) {
         self.worker_evictions.with_label_values(&[reason]).inc();
+    }
+
+    /// One KV-cache event that ingest skipped. `reason` must come from a
+    /// closed set, since it becomes a label value.
+    pub fn record_kv_event_skipped(&self, workerset: &str, reason: &'static str) {
+        self.kv_events_skipped
+            .with_label_values(&[workerset, reason])
+            .inc();
     }
 
     /// One KV-cache event as ingest decoded it, with the blocks it carried.
