@@ -19,8 +19,8 @@
 # "Under enforce" means the repository variable POLICY_ENFORCE is true.
 # A pull request names its issue in the Development section or in the
 # Issues part of its description. A draft skips the four shape rules.
-# A pull request from Dependabot skips the issue rules and the
-# description rule.
+# A pull request from Dependabot skips the issue rules, the title
+# rule and the description rule.
 # A pull request that the bot closed opens again once every rule
 # passes. A pull request that a person closed is left alone.
 #
@@ -107,13 +107,14 @@ issue_rules() {
 
 is_dependabot() { [[ $(jq -r .author.login <<< "$1") == "$DEPENDABOT" ]]; }
 
-# The title and the commit subjects fit, and the description holds
-# the template's six parts in order unless Dependabot opened the pull
-# request. Prints one reason per broken rule.
+# The commit subjects fit and the branch holds no merge commit. The
+# title fits and the description holds the template's six parts in
+# order, unless Dependabot opened the pull request. Dependabot writes
+# its own title. Prints one reason per broken rule.
 shape_rules() {
   local number=$1 pr=$2 title
   title=$(jq -r .title <<< "$pr")
-  (( ${#title} <= 72 )) || echo "the title is longer than 72 characters"
+  is_dependabot "$pr" || (( ${#title} <= 72 )) || echo "the title is longer than 72 characters"
   is_dependabot "$pr" || jq -r '.body // ""' <<< "$pr" | tr -d '\r' | strip_comments | awk -v parts="$PARTS" '
     BEGIN { n = split(parts, L, "|"); next_part = 1 }
     { gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 == L[next_part]) next_part++ }
