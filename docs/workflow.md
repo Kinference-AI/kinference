@@ -99,7 +99,8 @@ own sub-issue. That merge closes the parent.
   description follow [CONTRIBUTING.md](../CONTRIBUTING.md).
 - Dependabot opens weekly pull requests that update Cargo crates and
   GitHub Actions. A Dependabot pull request needs no issue and no
-  six-part description. Its title and commits still follow
+  six-part description. Dependabot writes the title, so the title may
+  be longer than 72 characters. The commits still follow
   CONTRIBUTING.md.
 
 ## Enforcement
