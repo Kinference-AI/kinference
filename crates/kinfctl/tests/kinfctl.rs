@@ -526,6 +526,39 @@ fn live_objects_on_stdin_are_checked_beside_a_draft() {
     );
 }
 
+/// One of our kinds under a misspelled API group is a finding, never a
+/// silently skipped document.
+#[test]
+fn a_misspelled_api_group_is_a_finding() {
+    let demo = Demo::new();
+    let policy = demo.path("policy-1.yaml");
+    let typo = POLICY_1.replace("kinference.buoyant.io", "kinference.buoyant.com");
+    let out = kinfctl_with_stdin(&["check", policy.as_str(), "-"], &typo);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(
+        stdout.contains(
+            "E <stdin> (document 1, InferencePolicy): UnknownApiGroup: apiVersion \
+             `kinference.buoyant.com/v1alpha1` is not ours"
+        ),
+        "{stdout}"
+    );
+
+    // Alone, it still exits 1 with the finding rather than "no InferencePolicy".
+    let out = kinfctl_with_stdin(&["check", "-"], &typo);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("UnknownApiGroup"), "{stdout}");
+
+    // Another project's kind of the same name is skipped, as before.
+    let other = POLICY_1.replace(
+        "kinference.buoyant.io/v1alpha1",
+        "inference.networking.k8s.io/v1",
+    );
+    let out = kinfctl_with_stdin(&["check", policy.as_str(), "-"], &other);
+    assert_eq!(out.status.code(), Some(0));
+}
+
 /// Input that cannot be checked is exit 2 with the reason on stderr, never
 /// mixed into the report on stdout.
 #[test]
