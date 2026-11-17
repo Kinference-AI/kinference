@@ -306,6 +306,9 @@ pub struct WorkerContext {
     pub prom: Arc<FleetMetrics>,
     pub models: Arc<ModelIndex>,
     pub eviction_tx: EvictionTx,
+    /// The worker set declares its models. A `/v1/models` scrape then only
+    /// reads metadata: it never claims models or evicts the worker.
+    pub declared_models: bool,
     /// The per-worker token; cancelled when the worker is removed or evicted.
     pub cancel: CancellationToken,
 }

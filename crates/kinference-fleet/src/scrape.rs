@@ -387,6 +387,7 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
         models: index,
         pool_id,
         pool_name,
+        declared_models,
         ..
     } = ctx;
     let Some(http_url) = cfg.http_url.clone() else {
@@ -419,38 +420,42 @@ pub fn spawn_one_shot_warmup(ctx: WorkerContext, samples: Arc<MetricsRegistry>) 
                     engine = %engine_str,
                     "fetched /v1/models"
                 );
-                match workers.set_served_models(cfg.worker_id_num, &names) {
-                    // Widened/Narrowed are routable, e.g. a LoRA adapter
-                    // rollout: index what this worker serves rather than evict.
-                    crate::workers::ServedModelsVerdict::Widened { added } => {
-                        tracing::info!(
-                            worker_id = cfg.worker_id_str,
-                            ?added,
-                            "worker serves models new to its worker set"
-                        );
-                        index.associate(pool_id, &pool_name, &names);
-                    }
-                    crate::workers::ServedModelsVerdict::Narrowed { missing } => {
-                        tracing::info!(
-                            worker_id = cfg.worker_id_str,
-                            ?missing,
-                            "worker lacks models that its worker set serves"
-                        );
-                        index.associate(pool_id, &pool_name, &names);
-                    }
-                    crate::workers::ServedModelsVerdict::Accepted
-                    | crate::workers::ServedModelsVerdict::Empty => {
-                        index.associate(pool_id, &pool_name, &names);
-                    }
-                    crate::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
-                        let _ = eviction_tx.send(crate::eviction::EvictionRequest {
-                            worker_id_num: cfg.worker_id_num,
-                            reason: crate::eviction::EvictionReason::ModelMismatch {
-                                expected,
-                                observed,
-                            },
-                        });
-                        return;
+                // A declared list is authoritative: the scrape only reads
+                // metadata.
+                if !declared_models {
+                    match workers.set_served_models(cfg.worker_id_num, &names) {
+                        // Widened/Narrowed are routable, e.g. a LoRA adapter
+                        // rollout: index what this worker serves rather than evict.
+                        crate::workers::ServedModelsVerdict::Widened { added } => {
+                            tracing::info!(
+                                worker_id = cfg.worker_id_str,
+                                ?added,
+                                "worker serves models new to its worker set"
+                            );
+                            index.associate(pool_id, &pool_name, &names);
+                        }
+                        crate::workers::ServedModelsVerdict::Narrowed { missing } => {
+                            tracing::info!(
+                                worker_id = cfg.worker_id_str,
+                                ?missing,
+                                "worker lacks models that its worker set serves"
+                            );
+                            index.associate(pool_id, &pool_name, &names);
+                        }
+                        crate::workers::ServedModelsVerdict::Accepted
+                        | crate::workers::ServedModelsVerdict::Empty => {
+                            index.associate(pool_id, &pool_name, &names);
+                        }
+                        crate::workers::ServedModelsVerdict::Mismatch { expected, observed } => {
+                            let _ = eviction_tx.send(crate::eviction::EvictionRequest {
+                                worker_id_num: cfg.worker_id_num,
+                                reason: crate::eviction::EvictionReason::ModelMismatch {
+                                    expected,
+                                    observed,
+                                },
+                            });
+                            return;
+                        }
                     }
                 }
                 if let Some(eng) = detected_engine {
@@ -487,6 +492,7 @@ pub fn spawn_metrics_poller(
         models: index,
         pool_id,
         pool_name,
+        declared_models,
         cancel,
         ..
     } = ctx;
@@ -559,40 +565,42 @@ pub fn spawn_metrics_poller(
                     Ok((models, detected_engine)) => {
                         // Index the served models so requests route here.
                         let names: Vec<String> = models.iter().map(|m| m.name.clone()).collect();
-                        match workers.set_served_models(cfg.worker_id_num, &names) {
-                            // As in the warmup path: only a conflict is fatal.
-                            crate::workers::ServedModelsVerdict::Widened { added } => {
-                                tracing::info!(
-                                    worker_id = cfg.worker_id_str,
-                                    ?added,
-                                    "worker serves models new to its worker set"
-                                );
-                                index.associate(pool_id, &pool_name, &names);
-                            }
-                            crate::workers::ServedModelsVerdict::Narrowed { missing } => {
-                                tracing::info!(
-                                    worker_id = cfg.worker_id_str,
-                                    ?missing,
-                                    "worker lacks models that its worker set serves"
-                                );
-                                index.associate(pool_id, &pool_name, &names);
-                            }
-                            crate::workers::ServedModelsVerdict::Accepted
-                            | crate::workers::ServedModelsVerdict::Empty => {
-                                index.associate(pool_id, &pool_name, &names);
-                            }
-                            crate::workers::ServedModelsVerdict::Mismatch {
-                                expected,
-                                observed,
-                            } => {
-                                let _ = eviction_tx.send(crate::eviction::EvictionRequest {
-                                    worker_id_num: cfg.worker_id_num,
-                                    reason: crate::eviction::EvictionReason::ModelMismatch {
-                                        expected,
-                                        observed,
-                                    },
-                                });
-                                return;
+                        if !declared_models {
+                            match workers.set_served_models(cfg.worker_id_num, &names) {
+                                // As in the warmup path: only a conflict is fatal.
+                                crate::workers::ServedModelsVerdict::Widened { added } => {
+                                    tracing::info!(
+                                        worker_id = cfg.worker_id_str,
+                                        ?added,
+                                        "worker serves models new to its worker set"
+                                    );
+                                    index.associate(pool_id, &pool_name, &names);
+                                }
+                                crate::workers::ServedModelsVerdict::Narrowed { missing } => {
+                                    tracing::info!(
+                                        worker_id = cfg.worker_id_str,
+                                        ?missing,
+                                        "worker lacks models that its worker set serves"
+                                    );
+                                    index.associate(pool_id, &pool_name, &names);
+                                }
+                                crate::workers::ServedModelsVerdict::Accepted
+                                | crate::workers::ServedModelsVerdict::Empty => {
+                                    index.associate(pool_id, &pool_name, &names);
+                                }
+                                crate::workers::ServedModelsVerdict::Mismatch {
+                                    expected,
+                                    observed,
+                                } => {
+                                    let _ = eviction_tx.send(crate::eviction::EvictionRequest {
+                                        worker_id_num: cfg.worker_id_num,
+                                        reason: crate::eviction::EvictionReason::ModelMismatch {
+                                            expected,
+                                            observed,
+                                        },
+                                    });
+                                    return;
+                                }
                             }
                         }
                         if let Some(eng) = detected_engine {
@@ -610,8 +618,10 @@ pub fn spawn_metrics_poller(
                             .insert(cfg.worker_id_num, ModelsInfo { models });
                         warned_about_models = false;
                     }
+                    // An engine behind a declared list may not serve
+                    // `/v1/models` at all.
                     Err(err) => {
-                        if !warned_about_models {
+                        if !declared_models && !warned_about_models {
                             tracing::warn!(
                                 worker_id = cfg.worker_id_str,
                                 http_url,

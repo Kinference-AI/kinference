@@ -9,13 +9,14 @@ struct Harness {
     metrics: Arc<MetricsRegistry>,
     models: Arc<ModelIndex>,
     process: CancellationToken,
+    inbox: Inbox,
 }
 
 fn harness() -> Harness {
     let metrics = Arc::new(MetricsRegistry::new());
     let models = Arc::new(ModelIndex::new());
     let process = CancellationToken::new();
-    let (coordinator, _inbox) = Coordinator::new(
+    let (coordinator, inbox) = Coordinator::new(
         Handles {
             cancel: process.clone(),
             // Announces nothing and waits for cancellation.
@@ -38,7 +39,39 @@ fn harness() -> Harness {
         metrics,
         models,
         process,
+        inbox,
     }
+}
+
+/// An engine that answers every request with `models_json` and counts the
+/// `/v1/models` requests. Returns its base URL.
+async fn serve_models(models_json: &'static str) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = hits.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let counter = counter.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                if buf[..n].starts_with(b"GET /v1/models") {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{models_json}",
+                    models_json.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (url, hits)
 }
 
 /// No endpoints, so the per-worker tasks return before any I/O.
@@ -133,6 +166,42 @@ async fn declared_models_seed_the_worker_and_mark_it_ready() {
 
     assert!(conflicted.registry.lookup(2).is_some());
     assert!(h.models.pools_for("mistral").is_empty());
+}
+
+/// With a declared list, a `/v1/models` scrape that reports other models
+/// records the metadata but neither evicts the worker nor claims those
+/// models.
+#[tokio::test]
+async fn a_declared_list_ignores_the_scraped_model_names() {
+    let mut h = harness();
+    let (url, hits) = serve_models(r#"{"data":[{"id":"other","max_model_len":4096}]}"#).await;
+    let pool = pool_with_declared_models("a", &["llama"]);
+    let mut w = worker(1, "");
+    w.http_url = Some(url.clone());
+    w.metrics_url = Some(format!("{url}/metrics"));
+
+    h.coordinator.add_worker(&pool, w);
+
+    // The warmup and the poller's first tick.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while hits.load(std::sync::atomic::Ordering::SeqCst) < 2
+            || h.metrics.models(1).models.is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both scrapes ran");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert!(h.inbox.evictions.try_recv().is_err(), "no eviction");
+    assert_eq!(h.models.pools_for("llama"), vec![pool.id]);
+    assert!(h.models.pools_for("other").is_empty());
+    assert_eq!(
+        pool.registry.lookup(1).unwrap().current_models,
+        ["llama".to_string()]
+    );
+    h.process.cancel();
 }
 
 /// Eviction stops the worker's tasks and drops every trace of it: the

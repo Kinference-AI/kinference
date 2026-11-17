@@ -202,8 +202,9 @@ impl Coordinator {
         self.task_tokens
             .insert((pool.id, w.worker_id_num), worker_token.clone());
 
-        // A declared model list is authoritative: seed it and skip
-        // `/v1/models`, for engines that don't serve it.
+        // A declared model list is authoritative: seed it here. A
+        // `/v1/models` scrape then reads only metadata, for engines that
+        // don't serve it or serve other names.
         if let Some(declared) = pool.static_models.as_deref() {
             if declared.is_empty() {
                 tracing::warn!(
@@ -259,14 +260,15 @@ impl Coordinator {
             prom: self.prom.clone(),
             models: self.models.clone(),
             eviction_tx: self.eviction_tx.clone(),
+            declared_models: pool.static_models.is_some(),
             cancel: worker_token,
         };
 
         // The metrics poller and warmup update model routing after a
         // /v1/models scrape.
         ingest::spawn_worker_listener(ctx.clone(), self.settings.ingest);
-        // With a declared model list, push the models refresh out of the
-        // way; the poller still scrapes load metrics.
+        // With a declared model list, refresh the metadata only on the
+        // first tick; the poller still scrapes load metrics.
         let refresh_secs = if pool.static_models.is_some() {
             u64::MAX / 2000
         } else {
