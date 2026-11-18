@@ -1,0 +1,79 @@
+name: ai-review
+
+# Reviews a pull request with a model before a maintainer does, as
+# docs/ai-review.md describes. The job checks out the base branch only.
+# It fetches the pull request head as data and never runs anything from
+# it. Only the agent step sees the model API key, and that step gets no
+# GitHub token. The repository variable AI_REVIEW_PHASE (shadow, handoff
+# or full) turns the review on.
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+  # The e2e suite reports from another repository as the `e2e` check run.
+  check_run:
+    types: [completed]
+  pull_request_target:
+    types: [ready_for_review]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: A pull request number
+        required: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr || github.event.workflow_run.head_sha || github.event.check_run.head_sha }}
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    if: >-
+      contains(fromJSON('["shadow","handoff","full"]'), vars.AI_REVIEW_PHASE) &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.event == 'pull_request') &&
+      (github.event_name != 'check_run' || github.event.check_run.name == 'e2e') &&
+      (github.event_name != 'issue_comment' ||
+        (github.event.issue.pull_request && startsWith(github.event.comment.body, '/ai-review')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            .github/ai-review
+            AGENTS.md
+            docs/prose.md
+      - name: "Step 1: prepare"
+        id: prepare
+        run: python3 .github/ai-review/review.py prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AI_REVIEW_WORK: ${{ runner.temp }}/ai-review
+      - name: "Step 2: agent, install the dependencies"
+        if: steps.prepare.outputs.action == 'review'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q --require-hashes --only-binary :all: --no-deps \
+            -r .github/ai-review/requirements.txt
+      - name: "Step 2: agent, review the pull request"
+        if: steps.prepare.outputs.action == 'review'
+        run: '"$RUNNER_TEMP/venv/bin/python" .github/ai-review/review.py agent'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AI_REVIEW_WORK: ${{ runner.temp }}/ai-review
+      # Runs after a failed agent step too, so the pull request still
+      # reaches the maintainers with ai-review/error.
+      - name: "Step 3: decide"
+        if: always() && steps.prepare.outputs.action != '' && steps.prepare.outputs.action != 'none'
+        run: python3 .github/ai-review/review.py decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AI_REVIEW_WORK: ${{ runner.temp }}/ai-review
+          AI_REVIEW_PHASE: ${{ vars.AI_REVIEW_PHASE }}

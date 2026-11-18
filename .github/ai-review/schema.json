@@ -1,0 +1,51 @@
+{
+  "type": "object",
+  "properties": {
+    "assessment": {
+      "type": "object",
+      "properties": {
+        "risk": { "type": "string", "enum": ["low", "medium", "high"] },
+        "complexity": { "type": "string", "enum": ["low", "medium", "high"] },
+        "maintainer_summary": { "type": "string" },
+        "ready_for_maintainer": { "type": "boolean" }
+      },
+      "required": ["risk", "complexity", "maintainer_summary", "ready_for_maintainer"],
+      "additionalProperties": false
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": { "type": "string" },
+          "severity": { "type": "string", "enum": ["blocking", "advisory"] },
+          "category": {
+            "type": "string",
+            "enum": ["correctness", "security", "tests", "api-compat", "docs", "commit-structure"]
+          },
+          "commit": { "type": ["string", "null"] },
+          "file": { "type": ["string", "null"] },
+          "line": { "type": ["integer", "null"] },
+          "message": { "type": "string" },
+          "suggestion": { "type": ["string", "null"] }
+        },
+        "required": ["key", "severity", "category", "commit", "file", "line", "message", "suggestion"],
+        "additionalProperties": false
+      }
+    },
+    "previous_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": { "type": "string" },
+          "status": { "type": "string", "enum": ["addressed", "open"] }
+        },
+        "required": ["key", "status"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["assessment", "findings", "previous_findings"],
+  "additionalProperties": false
+}

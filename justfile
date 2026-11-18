@@ -37,6 +37,11 @@ lint: check-fmt clippy lint-chart
 test-unit:
     cargo test
 
+# unit tests for the automated review workflow under .github/ai-review
+[group('test')]
+test-ai-review:
+    cd .github/ai-review && python3 -m unittest discover -s tests
+
 [group('build')]
 image:
     docker build --build-arg KINFERENCE_VERSION={{KINFERENCE_VERSION}} -t {{IMAGE}} .

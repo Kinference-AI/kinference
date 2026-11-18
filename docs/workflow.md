@@ -72,8 +72,12 @@ whose Issues part says `Closes #N`. After a design, the contributor
 claims a sub-issue and opens a pull request for it, in the design's
 landing order. Each pull request closes its sub-issue.
 
-The maintainers review. The contributor answers review with fixup
-commits, and folds them once the review is done.
+An automated reviewer reads the pull request first, once CI and the
+`e2e` check pass.
+[ai-review.md](ai-review.md) describes its rounds and its handoff to the
+maintainers. The maintainers review after the handoff. The contributor
+answers review with fixup commits, and folds them once the review is
+done.
 
 ## 5. Merge
 

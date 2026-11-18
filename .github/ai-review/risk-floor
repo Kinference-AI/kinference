@@ -1,0 +1,16 @@
+# Minimum risk level per path. Each line holds a glob and a level, and
+# the highest level among the matching lines wins. `*` also matches `/`.
+.github/*                               high
+Cargo.toml                              high
+Cargo.lock                              high
+*/Cargo.toml                            high
+Dockerfile                              high
+rust-toolchain.toml                     high
+charts/kinference-crds/*                high
+crates/kinference-router/proto/*        high
+charts/kinference/templates/*           medium
+charts/kinference/values.yaml           medium
+src/config/*                            medium
+src/admin/*                             medium
+.agents/*                               medium
+justfile                                medium
