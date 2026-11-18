@@ -1,0 +1,14 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "max_tokens": 16000,
+  "max_turns": 40,
+  "max_rounds": 3,
+  "max_changed_lines": 1000,
+  "max_changed_files": 30,
+  "size_buckets": { "s": 100, "m": 400, "l": 1000 },
+  "ci_workflow": "ci.yml",
+  "e2e_check": "e2e",
+  "policy_check": "Pull request policy",
+  "maintainers_team": "maintainers"
+}
