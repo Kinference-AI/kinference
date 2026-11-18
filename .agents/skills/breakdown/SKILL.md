@@ -31,7 +31,7 @@ newer.
    and Today from the design's sections. What is the line. Done is
    the line's Done. The title is the line's title.
 5. Check every sentence of each draft against the prose rules in
-   AGENTS.md and rewrite each sentence that fails.
+   docs/prose.md and rewrite each sentence that fails.
 6. Show every draft with its command. On a yes, file them in landing
    order, each with
    `gh issue create --parent <N> --title "..." --label enhancement --body-file -`
