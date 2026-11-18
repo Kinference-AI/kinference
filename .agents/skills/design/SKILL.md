@@ -60,7 +60,7 @@ answer. Look every fact up first.
    `references/builder-check.md`. Play back to the user only the
    findings that need a decision, one at a time.
 8. Check every sentence of the draft against the prose rules in
-   AGENTS.md and rewrite each sentence that fails.
+   docs/prose.md and rewrite each sentence that fails.
 9. Show the user the path and the Summary, Proposal and Break-down
    sections. Revise until they approve.
 10. Commit only when the user asks: a branch from `origin/main`, one
