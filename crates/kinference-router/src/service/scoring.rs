@@ -139,7 +139,7 @@ impl Scoring {
             Input::Tokens(t) => TokenSource::Direct(t),
             Input::Raw(s) => TokenSource::NeedsTokenize(TokenizeInput::Raw(s)),
             Input::Chat(s) => TokenSource::NeedsTokenize(TokenizeInput::Chat {
-                messages: vec![serde_json::json!({ "role": "user", "content": s })],
+                messages: Arc::new(vec![serde_json::json!({ "role": "user", "content": s })]),
                 kwargs: chat_kwargs,
                 tools,
                 tool_choice,
@@ -167,7 +167,7 @@ impl Scoring {
                     workerset: &pool.name,
                     model,
                     input: tok_input,
-                    raw_body: raw_body.as_deref(),
+                    raw_body: raw_body.as_ref(),
                 };
                 match tokenizer.tokenize(tok_req).await {
                     crate::tokenizer::TokenizeOutcome::Ok(tokens) => {

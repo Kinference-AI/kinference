@@ -617,33 +617,39 @@ pub(crate) enum Input {
     Raw(String),
     #[allow(dead_code)]
     Chat(String),
-    /// OpenAI-style messages array, already parsed.
-    Messages(Vec<serde_json::Value>),
+    /// OpenAI-style messages array, already parsed. Shared, so that a copy
+    /// of the input does not copy the prompt.
+    Messages(Arc<Vec<serde_json::Value>>),
     #[allow(dead_code)]
     Tokens(Vec<u32>),
 }
 
 /// A request body as the engine will receive it, and the model that it
-/// names.
+/// names. A clone shares the bytes.
 #[derive(Clone)]
 pub(crate) struct RawBody {
-    pub bytes: Vec<u8>,
+    pub bytes: bytes::Bytes,
     pub model: String,
 }
 
 impl RawBody {
     /// The bytes, naming `model`. A policy may score the request against a
     /// model other than the one that the body names, and the render endpoint
-    /// refuses a model that it does not serve.
-    pub(crate) fn naming(self, model: &str) -> Vec<u8> {
+    /// refuses a model that it does not serve. Only a body for another model
+    /// is a new buffer.
+    pub(crate) fn naming(self, model: &str) -> bytes::Bytes {
         if self.model == model {
             return self.bytes;
         }
-        crate::pick_body::rewrite_model(&self.bytes, model).unwrap_or(self.bytes)
+        match crate::pick_body::rewrite_model(&self.bytes, model) {
+            Some(rewritten) => rewritten.into(),
+            None => self.bytes,
+        }
     }
 }
 
-/// What one `(pool, model)` is scored from.
+/// What one `(pool, model)` is scored from. A clone shares the prompt: the
+/// messages, the tools and the body bytes.
 #[derive(Clone)]
 pub(crate) struct ScoreInput {
     pub input: Input,
@@ -760,7 +766,7 @@ fn best_group(
 /// default.
 #[derive(Debug, Clone)]
 pub struct ChatExtras {
-    pub tools: Vec<serde_json::Value>,
+    pub tools: Arc<Vec<serde_json::Value>>,
     pub tool_choice: Option<serde_json::Value>,
     pub add_generation_prompt: bool,
 }
@@ -768,7 +774,7 @@ pub struct ChatExtras {
 impl Default for ChatExtras {
     fn default() -> Self {
         Self {
-            tools: Vec::new(),
+            tools: Arc::default(),
             tool_choice: None,
             add_generation_prompt: true,
         }

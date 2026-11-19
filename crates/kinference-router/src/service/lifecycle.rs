@@ -305,15 +305,15 @@ impl KinferenceService {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
         let chat_extras = ChatExtras {
-            tools,
+            tools: Arc::new(tools),
             tool_choice,
             add_generation_prompt,
         };
         let inputs = ScoreInput {
-            input: Input::Messages(messages),
+            input: Input::Messages(Arc::new(messages)),
             chat_extras,
             raw_body: Some(RawBody {
-                bytes: body.bytes(req.body).to_vec(),
+                bytes: bytes::Bytes::copy_from_slice(body.bytes(req.body)),
                 model: model.clone(),
             }),
         };

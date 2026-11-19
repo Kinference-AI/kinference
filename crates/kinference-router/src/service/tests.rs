@@ -421,10 +421,12 @@ async fn select(
         resource_version: String::new(),
     };
     let spare = Some(ScoreInput {
-        input: Input::Messages(vec![serde_json::json!({"role": "user", "content": "hi"})]),
+        input: Input::Messages(Arc::new(vec![
+            serde_json::json!({"role": "user", "content": "hi"}),
+        ])),
         chat_extras: ChatExtras::default(),
         raw_body: Some(RawBody {
-            bytes: b"{}".to_vec(),
+            bytes: bytes::Bytes::from_static(b"{}"),
             model: "qwen".into(),
         }),
     });
@@ -521,10 +523,12 @@ async fn select_aliased(
         &[("10.0.0.1:8000", 0), ("10.0.0.2:8000", 5)],
     );
     let spare = Some(ScoreInput {
-        input: Input::Messages(vec![serde_json::json!({"role": "user", "content": "hi"})]),
+        input: Input::Messages(Arc::new(vec![
+            serde_json::json!({"role": "user", "content": "hi"}),
+        ])),
         chat_extras: ChatExtras::default(),
         raw_body: Some(RawBody {
-            bytes: b"{}".to_vec(),
+            bytes: bytes::Bytes::from_static(b"{}"),
             model: "qwen".into(),
         }),
     });
@@ -1688,6 +1692,55 @@ async fn a_kept_rules_model_keeps_rendering_when_another_rule_drops() {
     assert!(matches!(out, PickAndRecordOutcome::Ok { .. }), "{out:?}");
     assert!(routed_locally_to(&t, "qwen-ws"));
     assert_eq!(rendered_models(&t), ["glm-up", "qwen-up"]);
+}
+
+/// A clone of a scoring input shares the prompt: the body bytes, the
+/// messages and the tools. Each render takes a clone, so the prompt is in
+/// memory once however many models render.
+#[test]
+fn a_cloned_score_input_shares_the_prompt() {
+    let input = ScoreInput {
+        input: Input::Messages(Arc::new(vec![
+            serde_json::json!({"role": "user", "content": "hi"}),
+        ])),
+        chat_extras: ChatExtras {
+            tools: Arc::new(vec![serde_json::json!({"type": "function"})]),
+            ..Default::default()
+        },
+        raw_body: Some(RawBody {
+            bytes: bytes::Bytes::from(br#"{"model":"qwen"}"#.to_vec()),
+            model: "qwen".into(),
+        }),
+    };
+    let copy = input.clone();
+
+    let (Input::Messages(a), Input::Messages(b)) = (&input.input, &copy.input) else {
+        panic!("both hold messages");
+    };
+    assert!(Arc::ptr_eq(a, b));
+    assert!(Arc::ptr_eq(
+        &input.chat_extras.tools,
+        &copy.chat_extras.tools
+    ));
+    let (a, b) = (input.raw_body.unwrap(), copy.raw_body.unwrap());
+    assert_eq!(a.bytes.as_ptr(), b.bytes.as_ptr());
+}
+
+/// A render for the model that the body names sends the body's own buffer.
+/// A render for another model gets a new body that names that model.
+#[test]
+fn a_raw_body_is_copied_only_to_name_another_model() {
+    let body = RawBody {
+        bytes: bytes::Bytes::from(br#"{"model":"qwen","messages":[]}"#.to_vec()),
+        model: "qwen".into(),
+    };
+
+    let same = body.clone().naming("qwen");
+    assert_eq!(same.as_ptr(), body.bytes.as_ptr());
+
+    let other = body.clone().naming("glm");
+    assert_ne!(other.as_ptr(), body.bytes.as_ptr());
+    assert_eq!(model_in(&other), "glm");
 }
 
 /// The router never checks a provider's declared context window.

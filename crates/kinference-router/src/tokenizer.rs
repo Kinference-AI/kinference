@@ -65,10 +65,11 @@ pub enum TokenizeInput {
     /// `/v1/chat/completions/render` with `{ model, messages, tools,
     /// tool_choice, add_generation_prompt, chat_template_kwargs }`.
     Chat {
-        messages: Vec<serde_json::Value>,
+        /// Shared, so that a clone does not copy the prompt.
+        messages: Arc<Vec<serde_json::Value>>,
         kwargs: ChatTemplateKwargs,
         /// OpenAI `tools` array (JSON-schema dicts). Empty when absent.
-        tools: Vec<serde_json::Value>,
+        tools: Arc<Vec<serde_json::Value>>,
         /// OpenAI `tool_choice` ("auto" | "none" | "required" | {...}).
         /// `None` when unset.
         tool_choice: Option<serde_json::Value>,
@@ -99,7 +100,7 @@ pub(crate) struct TokenizeRequest<'a> {
     pub input: TokenizeInput,
     /// The client's body, forwarded verbatim to `/render` when present;
     /// local tokenization uses `input`.
-    pub raw_body: Option<&'a [u8]>,
+    pub raw_body: Option<&'a bytes::Bytes>,
 }
 
 /// Turns one request into the token ids the engine will hash.

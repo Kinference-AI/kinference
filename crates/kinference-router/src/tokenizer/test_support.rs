@@ -291,9 +291,9 @@ pub(crate) const WORDLEVEL_CHAT_TEMPLATE: &str =
 /// One user message, with no tools or kwargs.
 pub(crate) fn chat_input(text: &str) -> TokenizeInput {
     TokenizeInput::Chat {
-        messages: vec![serde_json::json!({"role": "user", "content": text})],
+        messages: Arc::new(vec![serde_json::json!({"role": "user", "content": text})]),
         kwargs: Default::default(),
-        tools: Vec::new(),
+        tools: Arc::default(),
         tool_choice: None,
         add_generation_prompt: true,
     }

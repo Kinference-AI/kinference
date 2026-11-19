@@ -454,21 +454,16 @@ impl KinferenceService {
         for (model, on) in by_model {
             let scoring = self.scoring.clone();
             let tokenizer = self.tokenizer.clone();
-            let mut input = Some(spare.clone());
+            // A clone of the input shares the prompt, so each attempt takes
+            // one.
+            let input = spare.clone();
             let task_model = model.clone();
             let task = async move {
                 let model = task_model;
-                let mut on = on.into_iter().peekable();
                 let mut last = None;
-                while let Some(pool) = on.next() {
-                    let this = if on.peek().is_some() {
-                        input.clone()
-                    } else {
-                        input.take()
-                    };
-                    let Some(this) = this else { break };
+                for pool in on {
                     let (outcome, side) = scoring
-                        .score_workers(&*tokenizer, &pool, &model, this, HashMap::new())
+                        .score_workers(&*tokenizer, &pool, &model, input.clone(), HashMap::new())
                         .await;
                     let failed =
                         matches!(outcome, ScoreOutcome::Unavailable(_, Degraded::Tokenize));
