@@ -19,6 +19,8 @@ pub(crate) enum Render {
     Failing,
     /// No worker has an `http_url`, so nothing is tried.
     Absent,
+    /// Every request gets this status, with a body that echoes the request.
+    Status(u16),
 }
 
 /// One request the fake `/render` was sent.
@@ -63,6 +65,11 @@ impl FakeRender {
                                 .into_response()
                         }
                         Render::Absent => unreachable!("no server is started for Absent"),
+                        Render::Status(code) => (
+                            axum::http::StatusCode::from_u16(code).expect("a status code"),
+                            body,
+                        )
+                            .into_response(),
                     }
                 }
             });

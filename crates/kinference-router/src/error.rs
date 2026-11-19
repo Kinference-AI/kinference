@@ -13,11 +13,9 @@ pub enum Error {
     },
     /// A `/render` request failed in flight, or its body could not be read.
     Render { url: String, source: reqwest::Error },
-    /// `/render` answered with a non-2xx status.
-    RenderStatus {
-        status: reqwest::StatusCode,
-        body: String,
-    },
+    /// `/render` answered with a non-2xx status. The body is dropped because
+    /// it may echo the prompt.
+    RenderStatus { status: reqwest::StatusCode },
     /// A `/render` body is not the JSON expected; `what` names the step.
     RenderDecode {
         what: &'static str,
@@ -35,7 +33,11 @@ pub enum Error {
         model: String,
         source: tokenizers::Error,
     },
-    /// The blocking Hub load was cancelled or panicked.
+    /// Another request is loading the model's tokenizer.
+    TokenizerLoading { model: String },
+    /// The model's tokenizer failed to load recently and is not retried yet.
+    TokenizerBackoff { model: String },
+    /// A blocking tokenizer load was cancelled or panicked.
     Join(tokio::task::JoinError),
     /// `encode` rejected the input.
     Encode {
@@ -90,15 +92,17 @@ impl std::fmt::Display for Error {
         match self {
             Error::HttpClient { what, .. } => write!(f, "building {what}"),
             Error::Render { url, .. } => write!(f, "POST {url}"),
-            Error::RenderStatus { status, body } => {
-                write!(f, "/render returned {status}: {body}")
-            }
+            Error::RenderStatus { status } => write!(f, "/render returned {status}"),
             Error::RenderDecode { what, .. } => f.write_str(what),
             Error::RenderShape(what) => f.write_str(what),
             Error::TokenizerFile { path, .. } => {
                 write!(f, "Tokenizer::from_file({})", path.display())
             }
             Error::TokenizerHub { model, .. } => write!(f, "Tokenizer::from_pretrained({model})"),
+            Error::TokenizerLoading { model } => write!(f, "the tokenizer for {model} is loading"),
+            Error::TokenizerBackoff { model } => {
+                write!(f, "the tokenizer for {model} failed to load recently")
+            }
             Error::Join(_) => f.write_str("spawn_blocking join"),
             Error::Encode { model, .. } => write!(f, "tokenizer encode failed for {model}"),
             Error::NoChatTemplate { model } => write!(
@@ -124,6 +128,8 @@ impl std::error::Error for Error {
             Error::RenderStatus { .. }
             | Error::RenderShape(_)
             | Error::NoChatTemplate { .. }
+            | Error::TokenizerLoading { .. }
+            | Error::TokenizerBackoff { .. }
             | Error::MissingFile(_)
             | Error::HubStatus { .. } => None,
             Error::RenderDecode { source, .. } => Some(source),

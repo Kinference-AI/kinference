@@ -5,6 +5,7 @@ use std::error::Error as StdError;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
+use tokio::sync::Semaphore;
 
 use super::http::HttpRender;
 use super::local::LocalTokenizer;
@@ -12,11 +13,16 @@ use super::{TokenizeInput, TokenizeOutcome, TokenizeRequest, Tokenizer};
 use crate::metrics::RouterMetrics;
 use crate::warn_once::WarnOnce;
 
+/// Most comparisons that run at once. A request that finds them all busy
+/// skips its comparison, so compare mode's CPU cost stays bounded.
+const MAX_COMPARISONS: usize = 4;
+
 #[derive(Clone)]
 pub(crate) struct Compare {
     http: Arc<HttpRender>,
     local: Arc<LocalTokenizer>,
     prom: Arc<RouterMetrics>,
+    comparisons: Arc<Semaphore>,
     /// Models that have diverged, so each logs its first divergence only.
     diverged: Arc<WarnOnce<String>>,
     /// Models that have failed locally, so each logs its first failure only.
@@ -33,6 +39,7 @@ impl Compare {
             http,
             local,
             prom,
+            comparisons: Arc::new(Semaphore::new(MAX_COMPARISONS)),
             diverged: Arc::default(),
             failed: Arc::default(),
         }
@@ -43,12 +50,17 @@ impl Compare {
     pub(crate) async fn render_then_compare(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
         let outcome = self.http.render(req).await;
         if let TokenizeOutcome::Ok(http_tokens) = &outcome {
+            let Ok(permit) = self.comparisons.clone().try_acquire_owned() else {
+                self.prom.record_tokenize_compare("skipped");
+                return outcome;
+            };
             let this = self.clone();
             let model = req.model.to_string();
             let input = req.input.clone();
             let http_tokens = http_tokens.clone();
             tokio::spawn(async move {
-                this.compare(&model, &input, &http_tokens).await;
+                this.compare(&model, input, &http_tokens).await;
+                drop(permit);
             });
         }
         outcome
@@ -56,8 +68,8 @@ impl Compare {
 
     /// Tokenize in process and count and log divergence from the `/render`
     /// tokens. Errors are counted, never returned.
-    pub(crate) async fn compare(&self, model: &str, input: &TokenizeInput, http_tokens: &[u32]) {
-        match self.local.encode(model, input).await {
+    pub(crate) async fn compare(&self, model: &str, input: TokenizeInput, http_tokens: &[u32]) {
+        match self.local.encode_on_blocking_thread(model, input).await {
             Ok(local_tokens) if local_tokens.as_slice() == http_tokens => {
                 self.prom.record_tokenize_compare("match");
             }
@@ -72,6 +84,7 @@ impl Compare {
                     .position(|(a, b)| a != b)
                     .unwrap_or_else(|| http_tokens.len().min(local_tokens.len()));
                 // 8 tokens before to 16 after the divergence, on both sides.
+                // Ids only: decoded text would put the prompt in the log.
                 let win_start = first_diff.saturating_sub(8);
                 let http_win: Vec<u32> = http_tokens
                     .iter()
@@ -85,14 +98,6 @@ impl Compare {
                     .take(24)
                     .copied()
                     .collect();
-                let http_text = self
-                    .local
-                    .decode(model, &http_win)
-                    .unwrap_or_else(|| "<decode-unavailable>".to_string());
-                let local_text = self
-                    .local
-                    .decode(model, &local_win)
-                    .unwrap_or_else(|| "<decode-unavailable>".to_string());
                 tracing::warn!(
                     model,
                     http_count = http_tokens.len(),
@@ -101,8 +106,6 @@ impl Compare {
                     window_start = win_start,
                     http_window = ?http_win,
                     local_window = ?local_win,
-                    http_text = %http_text,
-                    local_text = %local_text,
                     "local tokens differ from /render"
                 );
             }

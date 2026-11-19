@@ -246,3 +246,67 @@ async fn no_http_url_is_unavailable_without_an_attempt() {
     assert_eq!(attempts, 0);
     assert!(reason.contains("http_url"), "{reason}");
 }
+
+/// A status that rejects the body is not retried on another worker.
+#[tokio::test]
+async fn a_rejected_body_is_not_retried() {
+    for code in [400, 413, 422] {
+        let rejecting = FakeRender::start(Render::Status(code)).await;
+        let scrape = Arc::new(MetricsRegistry::new());
+        let workers = [
+            (1, at(&rejecting, "10.0.0.1:8000")),
+            (2, at(&rejecting, "10.0.0.2:8000")),
+        ];
+
+        let out = backend(&scrape)
+            .render(&request(&workers, "m", raw()))
+            .await;
+        let TokenizeOutcome::Unavailable { attempts, .. } = out else {
+            panic!("{code}: {out:?}");
+        };
+        assert_eq!(attempts, 1, "{code}");
+        assert_eq!(rejecting.calls(), 1, "{code}");
+    }
+}
+
+/// A status that may be particular to one worker moves on to the next.
+#[tokio::test]
+async fn a_worker_status_moves_to_the_next_worker() {
+    for code in [404, 429, 503] {
+        let failing = FakeRender::start(Render::Status(code)).await;
+        let fine = FakeRender::start(Render::Tokens(vec![2])).await;
+        let scrape = Arc::new(MetricsRegistry::new());
+        let workers = [
+            (1, at(&failing, "10.0.0.1:8000")),
+            (2, at(&fine, "10.0.0.2:8000")),
+        ];
+        scraped(&scrape, 1, Duration::ZERO);
+        scraped(&scrape, 2, Duration::from_secs(10));
+
+        let out = backend(&scrape)
+            .render(&request(&workers, "m", raw()))
+            .await;
+        assert_eq!(out, TokenizeOutcome::Ok(vec![2]), "{code}");
+        assert_eq!(failing.calls(), 1, "{code}");
+        assert_eq!(fine.calls(), 1, "{code}");
+    }
+}
+
+/// The reason for a failed render leaves out the response body, which may
+/// echo the prompt.
+#[tokio::test]
+async fn the_reason_leaves_out_the_response_body() {
+    let rejecting = FakeRender::start(Render::Status(400)).await;
+    let scrape = Arc::new(MetricsRegistry::new());
+    let workers = [(1, at(&rejecting, "10.0.0.1:8000"))];
+    let input = TokenizeInput::Raw("a secret prompt".into());
+
+    let out = backend(&scrape)
+        .render(&request(&workers, "m", input))
+        .await;
+    let TokenizeOutcome::Unavailable { reason, .. } = out else {
+        panic!("{out:?}");
+    };
+    assert!(reason.contains("400"), "{reason}");
+    assert!(!reason.contains("secret"), "{reason}");
+}

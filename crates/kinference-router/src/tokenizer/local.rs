@@ -14,7 +14,8 @@
 //!    expose it. Honors `HUGGING_FACE_HUB_TOKEN` for gated models.
 //!
 //! Tokenizers are cached by model name for the process lifetime (sub-MB to
-//! ~10MB each).
+//! ~10MB each). A model whose load fails is not loaded again for a minute.
+//! Until then, its requests fall back to `/render` without a load.
 //!
 //! ## Chat-template rendering
 //!
@@ -36,8 +37,10 @@ use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use serde::Deserialize;
 use tokenizers::tokenizer::Tokenizer;
 use tokio::sync::broadcast;
@@ -117,17 +120,31 @@ struct TokenizerConfigMeta {
     special_tokens: HashMap<String, String>,
 }
 
+/// How long after a failed load the next request may load the model again.
+const LOAD_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+/// Most models with a slot. Model names can come from the client, so past
+/// this a failed load leaves no slot and is not backed off.
+const MAX_SLOTS: usize = 1024;
+
+/// A model's tokenizer, or why a request can't have it yet.
+enum Slot {
+    Loaded(Arc<LoadedTokenizer>),
+    /// One caller is loading it. Others fall back instead of loading too.
+    Loading,
+    /// The last load failed. No caller loads it again before `retry_at`.
+    Failed {
+        retry_at: Instant,
+    },
+}
+
 /// In-process tokenization, falling back to `/render` on any local failure.
-/// Owns the loaded tokenizers, lazily loaded per model (the load itself is
-/// synchronous; a Hub fetch can block briefly), and their warm-up.
+/// Owns the loaded tokenizers, lazily loaded per model, and their warm-up.
 pub struct LocalTokenizer {
-    loaded: DashMap<String, Arc<LoadedTokenizer>>,
+    slots: DashMap<String, Slot>,
+    retry_after: Duration,
     config: LocalTokenizeConfig,
     hub: reqwest::Client,
-    /// Log-once latch per model for "mount miss, falling back to Hub".
-    /// Concurrent first-loads of a model aren't deduplicated (only one
-    /// result is kept), so without this each would log.
-    hub_fallback_logged: DashMap<String, ()>,
     /// Models that fail locally, so each logs once.
     failed: WarnOnce<String>,
     http: Arc<HttpRender>,
@@ -149,10 +166,10 @@ impl LocalTokenizer {
                 source,
             })?;
         Ok(Self {
-            loaded: DashMap::new(),
+            slots: DashMap::new(),
+            retry_after: LOAD_RETRY_AFTER,
             config,
             hub,
-            hub_fallback_logged: DashMap::new(),
             failed: WarnOnce::default(),
             http,
             prom,
@@ -241,19 +258,13 @@ impl LocalTokenizer {
     }
 
     /// Load `model_name`'s tokenizer into the cache, so requests find it
-    /// warm. The caller logs errors and moves on.
+    /// warm. A load that is running or backing off counts as warm. The
+    /// caller logs errors and moves on.
     pub async fn warmup(&self, model_name: &str) -> Result<(), Error> {
-        let _ = self.get_or_load(model_name).await?;
-        Ok(())
-    }
-
-    /// Decode tokens back to text, for compare-mode divergence logs.
-    ///
-    /// `None` if the model isn't loaded; never triggers a Hub fetch. Keeps
-    /// special tokens so control tokens show up in the log.
-    pub fn decode(&self, model_name: &str, tokens: &[u32]) -> Option<String> {
-        let entry = self.loaded.get(model_name)?;
-        entry.tokenizer.decode(tokens, false).ok()
+        match self.get_or_load(model_name).await {
+            Ok(_) | Err(Error::TokenizerLoading { .. } | Error::TokenizerBackoff { .. }) => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 
     /// Tokenize `input` against `model_name`'s tokenizer, in process only.
@@ -263,115 +274,89 @@ impl LocalTokenizer {
     /// `encode` rejects the input.
     pub async fn encode(&self, model_name: &str, input: &TokenizeInput) -> Result<Vec<u32>, Error> {
         let loaded = self.get_or_load(model_name).await?;
-        let encode = |source| Error::Encode {
-            model: model_name.to_string(),
-            source,
-        };
-        match input {
-            TokenizeInput::Raw(prompt) => {
-                let encoding = loaded
-                    .tokenizer
-                    .encode(prompt.as_str(), /* add_special_tokens */ true)
-                    .map_err(encode)?;
-                Ok(encoding.get_ids().to_vec())
-            }
-            TokenizeInput::Chat {
-                messages,
-                kwargs,
-                tools,
-                tool_choice,
-                add_generation_prompt,
-            } => {
-                let template =
-                    loaded
-                        .chat_template
-                        .as_deref()
-                        .ok_or_else(|| Error::NoChatTemplate {
-                            model: model_name.to_string(),
-                        })?;
-                let rendered = render_chat_template(
-                    template,
-                    messages,
-                    kwargs,
-                    tools,
-                    tool_choice.as_ref(),
-                    *add_generation_prompt,
-                    &loaded.special_tokens,
-                )?;
-                let encoding = loaded
-                    .tokenizer
-                    // The template emits the special tokens itself.
-                    .encode(rendered.as_str(), /* add_special_tokens */ false)
-                    .map_err(encode)?;
-                Ok(encoding.get_ids().to_vec())
-            }
-        }
+        encode_with(&loaded, model_name, input)
     }
 
-    /// Return the cached tokenizer, or load it (possibly from the network)
-    /// and insert it. Concurrent first-loads may each load; one is kept.
+    /// [`Self::encode`], with the template render and the encode on a
+    /// blocking thread.
+    pub(crate) async fn encode_on_blocking_thread(
+        &self,
+        model_name: &str,
+        input: TokenizeInput,
+    ) -> Result<Vec<u32>, Error> {
+        let loaded = self.get_or_load(model_name).await?;
+        let model = model_name.to_string();
+        tokio::task::spawn_blocking(move || encode_with(&loaded, &model, &input))
+            .await
+            .map_err(Error::Join)?
+    }
+
+    /// Return the cached tokenizer, or load it (possibly from the network).
+    /// At most one load per model runs at a time, and a failed load is not
+    /// retried for `retry_after`. Meanwhile callers get an error at once.
     async fn get_or_load(&self, model_name: &str) -> Result<Arc<LoadedTokenizer>, Error> {
-        if let Some(entry) = self.loaded.get(model_name) {
-            return Ok(Arc::clone(entry.value()));
+        if let Some(slot) = self.slots.get(model_name)
+            && let Some(ready) = slot_state(&slot, model_name)
+        {
+            return ready;
         }
-        let loaded = self.load(model_name).await?;
-        Ok(self
-            .loaded
-            .entry(model_name.to_string())
-            .or_insert(loaded)
-            .clone())
+        match self.slots.entry(model_name.to_string()) {
+            Entry::Occupied(mut slot) => {
+                if let Some(ready) = slot_state(slot.get(), model_name) {
+                    return ready;
+                }
+                slot.insert(Slot::Loading);
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(Slot::Loading);
+            }
+        }
+        let mut claim = LoadClaim {
+            slots: &self.slots,
+            model: model_name,
+            settled: false,
+        };
+        let result = self.load(model_name).await;
+        match &result {
+            Ok(loaded) => claim.settle(Slot::Loaded(loaded.clone())),
+            Err(err) => {
+                tracing::debug!(
+                    model = model_name,
+                    error = err as &dyn StdError,
+                    "tokenizer load failed"
+                );
+                claim.settle(Slot::Failed {
+                    retry_at: Instant::now() + self.retry_after,
+                });
+            }
+        }
+        result
     }
 
     async fn load(&self, model_name: &str) -> Result<Arc<LoadedTokenizer>, Error> {
-        // Mount path first.
-        if let Some(mount_dir) = self.config.mount_dir.as_deref() {
-            let dir = mount_dir.join(model_name);
-            let tok_path = dir.join("tokenizer.json");
-            if tok_path.exists() {
-                tracing::info!(
-                    model = model_name,
-                    path = %tok_path.display(),
-                    "loading the tokenizer from the mount"
-                );
-                let tokenizer =
-                    Tokenizer::from_file(&tok_path).map_err(|source| Error::TokenizerFile {
-                        path: tok_path.clone(),
-                        source,
-                    })?;
-                let meta = read_chat_template_from_config(&dir).unwrap_or_else(|e| {
-                    tracing::debug!(
-                        model = model_name,
-                        error = &e as &dyn StdError,
-                        "no chat template in the mount"
-                    );
-                    TokenizerConfigMeta {
-                        chat_template: None,
-                        special_tokens: HashMap::new(),
-                    }
-                });
-                return Ok(Arc::new(LoadedTokenizer {
-                    tokenizer,
-                    chat_template: meta.chat_template,
-                    special_tokens: meta.special_tokens,
-                }));
+        // The mount first. File reads block, so they run off the runtime.
+        if let Some(mount_dir) = self.config.mount_dir.clone() {
+            let model = model_name.to_string();
+            let mounted = tokio::task::spawn_blocking(move || {
+                load_from_mount(&mount_dir.join(&model), &model)
+            })
+            .await
+            .map_err(Error::Join)??;
+            if let Some(loaded) = mounted {
+                tracing::info!(model = model_name, source = "mount", "tokenizer loaded");
+                return Ok(Arc::new(loaded));
             }
         }
 
         // Fallback: HuggingFace Hub, on `spawn_blocking` since
         // `from_pretrained` blocks.
-        if self
-            .hub_fallback_logged
-            .insert(model_name.to_string(), ())
-            .is_none()
-        {
-            tracing::info!(
-                model = model_name,
-                "loading the tokenizer from the Hugging Face Hub"
-            );
-        }
         let model_name_owned = model_name.to_string();
+        let params = tokenizers::FromPretrainedParameters {
+            token: self.config.hub_token.clone(),
+            ..Default::default()
+        };
         let tokenizer = tokio::task::spawn_blocking(move || {
-            Tokenizer::from_pretrained(&model_name_owned, None).map_err(|source| {
+            Tokenizer::from_pretrained(&model_name_owned, Some(params)).map_err(|source| {
                 Error::TokenizerHub {
                     model: model_name_owned.clone(),
                     source,
@@ -395,12 +380,134 @@ impl LocalTokenizer {
                         special_tokens: HashMap::new(),
                     }
                 });
+        tracing::info!(model = model_name, source = "hub", "tokenizer loaded");
         Ok(Arc::new(LoadedTokenizer {
             tokenizer,
             chat_template: meta.chat_template,
             special_tokens: meta.special_tokens,
         }))
     }
+}
+
+/// Tokenize `input` with a loaded tokenizer. CPU-bound for a long prompt.
+fn encode_with(
+    loaded: &LoadedTokenizer,
+    model_name: &str,
+    input: &TokenizeInput,
+) -> Result<Vec<u32>, Error> {
+    let encode = |source| Error::Encode {
+        model: model_name.to_string(),
+        source,
+    };
+    match input {
+        TokenizeInput::Raw(prompt) => {
+            let encoding = loaded
+                .tokenizer
+                .encode(prompt.as_str(), /* add_special_tokens */ true)
+                .map_err(encode)?;
+            Ok(encoding.get_ids().to_vec())
+        }
+        TokenizeInput::Chat {
+            messages,
+            kwargs,
+            tools,
+            tool_choice,
+            add_generation_prompt,
+        } => {
+            let template =
+                loaded
+                    .chat_template
+                    .as_deref()
+                    .ok_or_else(|| Error::NoChatTemplate {
+                        model: model_name.to_string(),
+                    })?;
+            let rendered = render_chat_template(
+                template,
+                messages,
+                kwargs,
+                tools,
+                tool_choice.as_ref(),
+                *add_generation_prompt,
+                &loaded.special_tokens,
+            )?;
+            let encoding = loaded
+                .tokenizer
+                // The template emits the special tokens itself.
+                .encode(rendered.as_str(), /* add_special_tokens */ false)
+                .map_err(encode)?;
+            Ok(encoding.get_ids().to_vec())
+        }
+    }
+}
+
+/// What a request gets from `slot` without loading: the tokenizer, or an
+/// error while a load runs or backs off. `None` when the caller should load.
+fn slot_state(slot: &Slot, model_name: &str) -> Option<Result<Arc<LoadedTokenizer>, Error>> {
+    let model = || model_name.to_string();
+    match slot {
+        Slot::Loaded(loaded) => Some(Ok(loaded.clone())),
+        Slot::Loading => Some(Err(Error::TokenizerLoading { model: model() })),
+        Slot::Failed { retry_at } if Instant::now() < *retry_at => {
+            Some(Err(Error::TokenizerBackoff { model: model() }))
+        }
+        Slot::Failed { .. } => None,
+    }
+}
+
+/// The right to load one model. Dropped unsettled, as when the request is
+/// cancelled mid-load, it clears the slot so that the next request loads.
+struct LoadClaim<'a> {
+    slots: &'a DashMap<String, Slot>,
+    model: &'a str,
+    settled: bool,
+}
+
+impl LoadClaim<'_> {
+    fn settle(&mut self, slot: Slot) {
+        self.settled = true;
+        if matches!(slot, Slot::Failed { .. }) && self.slots.len() > MAX_SLOTS {
+            self.slots.remove(self.model);
+            return;
+        }
+        self.slots.insert(self.model.to_string(), slot);
+    }
+}
+
+impl Drop for LoadClaim<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.slots.remove(self.model);
+        }
+    }
+}
+
+/// Load `model_name` from its mount directory `dir`. `None` when the mount
+/// has no `tokenizer.json` for it. Blocks on file reads.
+fn load_from_mount(dir: &Path, model_name: &str) -> Result<Option<LoadedTokenizer>, Error> {
+    let tok_path = dir.join("tokenizer.json");
+    if !tok_path.exists() {
+        return Ok(None);
+    }
+    let tokenizer = Tokenizer::from_file(&tok_path).map_err(|source| Error::TokenizerFile {
+        path: tok_path.clone(),
+        source,
+    })?;
+    let meta = read_chat_template_from_config(dir).unwrap_or_else(|e| {
+        tracing::debug!(
+            model = model_name,
+            error = &e as &dyn StdError,
+            "no chat template in the mount"
+        );
+        TokenizerConfigMeta {
+            chat_template: None,
+            special_tokens: HashMap::new(),
+        }
+    });
+    Ok(Some(LoadedTokenizer {
+        tokenizer,
+        chat_template: meta.chat_template,
+        special_tokens: meta.special_tokens,
+    }))
 }
 
 // The HuggingFace type takes the short name here.
