@@ -1,8 +1,8 @@
 use super::*;
 use dynamo_kv_router::indexer::KvIndexerInterface;
 
-fn cfg(name: &str, block_size: u32) -> PoolSpec {
-    crate::pool::test_spec(name, block_size)
+fn cfg(name: &str) -> PoolSpec {
+    crate::pool::test_spec(name)
 }
 
 /// Dropping one pool doesn't disturb the process or its siblings, although
@@ -10,8 +10,8 @@ fn cfg(name: &str, block_size: u32) -> PoolSpec {
 #[tokio::test]
 async fn dropping_a_pool_cancels_only_that_pool() {
     let process = CancellationToken::new();
-    let a = Pool::from_spec(PoolId::next(), &cfg("a", 16), &process);
-    let b = Pool::from_spec(PoolId::next(), &cfg("b", 16), &process);
+    let a = Pool::from_spec(PoolId::next(), &cfg("a"), &process);
+    let b = Pool::from_spec(PoolId::next(), &cfg("b"), &process);
     let b_cancel = b.cancel.clone();
 
     let a_token = a.cancel.clone();
@@ -40,14 +40,14 @@ async fn dropping_a_pool_cancels_only_that_pool() {
 #[tokio::test]
 async fn a_stale_id_resolves_to_nothing_rather_than_to_another_pool() {
     let process = CancellationToken::new();
-    let doomed = Arc::new(Pool::from_spec(PoolId::next(), &cfg("a", 16), &process));
+    let doomed = Arc::new(Pool::from_spec(PoolId::next(), &cfg("a"), &process));
     let doomed_id = doomed.id;
 
     let registry = PoolRegistry::from_pools(vec![doomed.clone()]);
     assert!(registry.snapshot().get(doomed_id).is_some());
 
     // The pool leaves the fleet, and a replacement arrives.
-    let replacement = Arc::new(Pool::from_spec(PoolId::next(), &cfg("b", 16), &process));
+    let replacement = Arc::new(Pool::from_spec(PoolId::next(), &cfg("b"), &process));
     assert_ne!(
         replacement.id, doomed_id,
         "a fresh pool must never inherit a retired pool's id"
@@ -83,7 +83,7 @@ async fn publishing_wakes_subscribers() {
 #[tokio::test]
 async fn an_existing_snapshot_is_unaffected_by_a_later_publish() {
     let process = CancellationToken::new();
-    let a = Arc::new(Pool::from_spec(PoolId::next(), &cfg("a", 16), &process));
+    let a = Arc::new(Pool::from_spec(PoolId::next(), &cfg("a"), &process));
     let registry = PoolRegistry::from_pools(vec![a.clone()]);
 
     let held = registry.snapshot();
@@ -102,7 +102,7 @@ async fn an_existing_snapshot_is_unaffected_by_a_later_publish() {
 #[tokio::test]
 async fn inflight_handles_outlive_their_pool() {
     let process = CancellationToken::new();
-    let pool = Arc::new(Pool::from_spec(PoolId::next(), &cfg("a", 16), &process));
+    let pool = Arc::new(Pool::from_spec(PoolId::next(), &cfg("a"), &process));
     let pool_token = pool.cancel.clone();
 
     // What a pick stashes on its observation record.
@@ -138,7 +138,7 @@ async fn inflight_handles_outlive_their_pool() {
 #[tokio::test]
 async fn cancelling_the_process_cancels_every_pool() {
     let process = CancellationToken::new();
-    let p = Pool::from_spec(PoolId::next(), &cfg("a", 16), &process);
+    let p = Pool::from_spec(PoolId::next(), &cfg("a"), &process);
     assert!(!p.cancel.is_cancelled());
     process.cancel();
     assert!(p.cancel.is_cancelled(), "process shutdown must reach pools");
@@ -201,8 +201,8 @@ fn eager() -> ReapPolicy {
     }
 }
 
-fn spec(name: &str, block_size: u32) -> PoolSpec {
-    crate::pool::test_spec(name, block_size)
+fn spec(name: &str) -> PoolSpec {
+    crate::pool::test_spec(name)
 }
 
 fn worker_cfg(num: u64) -> crate::discovery::WorkerConfig {
@@ -218,7 +218,7 @@ fn worker_cfg(num: u64) -> crate::discovery::WorkerConfig {
 #[tokio::test]
 async fn create_retire_reap() {
     let mut h = harness(eager());
-    h.mgr.reconcile(vec![spec("a", 16)]);
+    h.mgr.reconcile(vec![spec("a")]);
     assert_eq!(h.registry.snapshot().len(), 1);
     let token = h
         .mgr
@@ -261,7 +261,7 @@ async fn a_retired_pool_indexer_still_answers_until_reaped() {
         linger: Duration::from_secs(30),
         backstop: Duration::from_secs(600),
     });
-    h.mgr.reconcile(vec![spec("a", 16)]);
+    h.mgr.reconcile(vec![spec("a")]);
     let pool = h.mgr.live_pool(&PoolKey::local("a")).unwrap().clone();
 
     h.mgr.reconcile(Vec::new());
@@ -278,7 +278,7 @@ async fn a_retired_pool_indexer_still_answers_until_reaped() {
 #[tokio::test]
 async fn a_pool_with_an_outstanding_handle_is_not_reaped() {
     let mut h = harness(eager());
-    h.mgr.reconcile(vec![spec("a", 16)]);
+    h.mgr.reconcile(vec![spec("a")]);
     let held = h.mgr.live_pool(&PoolKey::local("a")).unwrap().clone();
     let token = held.cancel.clone();
 
@@ -302,7 +302,7 @@ async fn the_backstop_reaps_past_the_deadline_even_when_held() {
         linger: Duration::ZERO,
         backstop: Duration::ZERO,
     });
-    h.mgr.reconcile(vec![spec("a", 16)]);
+    h.mgr.reconcile(vec![spec("a")]);
     let _leaked = h.mgr.live_pool(&PoolKey::local("a")).unwrap().clone();
     h.mgr.reconcile(Vec::new());
     assert_eq!(
@@ -321,7 +321,7 @@ async fn resurrection_preserves_the_pool_and_its_cache() {
         linger: Duration::from_secs(30),
         backstop: Duration::from_secs(600),
     });
-    h.mgr.reconcile(vec![spec("a", 16)]);
+    h.mgr.reconcile(vec![spec("a")]);
     let before = h.mgr.live_pool(&PoolKey::local("a")).unwrap().clone();
     let id_before = before.id;
     let indexer_before = Arc::as_ptr(&before.indexer);
@@ -331,7 +331,7 @@ async fn resurrection_preserves_the_pool_and_its_cache() {
     h.mgr.reconcile(Vec::new());
     assert_eq!(h.mgr.sweep(), 0, "the linger keeps it resurrectable");
 
-    let report = h.mgr.reconcile(vec![spec("a", 16)]);
+    let report = h.mgr.reconcile(vec![spec("a")]);
     assert_eq!(report.resurrected, vec![PoolKey::local("a")]);
     assert!(report.created.is_empty());
     let after = h.mgr.live_pool(&PoolKey::local("a")).unwrap();
@@ -360,29 +360,31 @@ async fn a_changed_spec_does_not_resurrect() {
         linger: Duration::from_secs(30),
         backstop: Duration::from_secs(600),
     });
-    h.mgr.reconcile(vec![spec("a", 16)]);
+    h.mgr.reconcile(vec![spec("a")]);
     let id_before = h.mgr.live_pool(&PoolKey::local("a")).unwrap().id;
     h.mgr.reconcile(Vec::new());
 
-    let report = h.mgr.reconcile(vec![spec("a", 64)]);
+    let mut changed = spec("a");
+    changed.profile = "other-profile".to_string();
+    let report = h.mgr.reconcile(vec![changed]);
     assert_eq!(report.created, vec![PoolKey::local("a")]);
     assert!(report.resurrected.is_empty());
     let after = h.mgr.live_pool(&PoolKey::local("a")).unwrap();
     assert_ne!(after.id, id_before);
-    assert_eq!(after.block_size, 64);
+    assert_eq!(after.profile, "other-profile");
 }
 
 /// An unchanged spec is a no-op.
 #[tokio::test]
 async fn reconciling_an_unchanged_set_does_nothing() {
     let mut h = harness(eager());
-    h.mgr.reconcile(vec![spec("a", 16), spec("b", 16)]);
+    h.mgr.reconcile(vec![spec("a"), spec("b")]);
     let ids: Vec<PoolId> = [PoolKey::local("a"), PoolKey::local("b")]
         .iter()
         .map(|k| h.mgr.live_pool(k).unwrap().id)
         .collect();
 
-    let report = h.mgr.reconcile(vec![spec("a", 16), spec("b", 16)]);
+    let report = h.mgr.reconcile(vec![spec("a"), spec("b")]);
     assert!(
         report.is_noop(),
         "steady state must be a no-op, got {report:?}"
@@ -399,11 +401,11 @@ async fn reconciling_an_unchanged_set_does_nothing() {
 #[tokio::test]
 async fn a_tuning_change_is_copy_on_write() {
     let mut h = harness(eager());
-    h.mgr.reconcile(vec![spec("a", 16)]);
+    h.mgr.reconcile(vec![spec("a")]);
     let before = h.mgr.live_pool(&PoolKey::local("a")).unwrap().clone();
     let snapshot_before = h.registry.snapshot();
 
-    let mut next = spec("a", 16);
+    let mut next = spec("a");
     next.predictor.base_ms = 999.0;
     let report = h.mgr.reconcile(vec![next]);
     assert_eq!(report.updated, vec![PoolKey::local("a")]);
@@ -429,7 +431,7 @@ async fn a_tuning_change_is_copy_on_write() {
 #[tokio::test]
 async fn changing_the_declared_model_list_reseeds_the_live_workers() {
     let mut h = harness(eager());
-    let mut first = spec("a", 16);
+    let mut first = spec("a");
     first.static_models = Some(vec!["old".to_string()]);
     h.mgr.reconcile(vec![first]);
 
@@ -439,7 +441,7 @@ async fn changing_the_declared_model_list_reseeds_the_live_workers() {
     pool.registry.set_served_models(1, &["old".to_string()]);
     h.models.associate(pool.id, "a", &["old".to_string()]);
 
-    let mut next = spec("a", 16);
+    let mut next = spec("a");
     next.static_models = Some(vec!["new".to_string()]);
     let report = h.mgr.reconcile(vec![next]);
     assert_eq!(report.updated, vec![PoolKey::local("a")]);
@@ -460,26 +462,11 @@ async fn changing_the_declared_model_list_reseeds_the_live_workers() {
     );
 }
 
-/// A block-size change replaces the pool.
-#[tokio::test]
-async fn a_block_size_change_replaces_the_pool() {
-    let mut h = harness(eager());
-    h.mgr.reconcile(vec![spec("a", 16)]);
-    let id_before = h.mgr.live_pool(&PoolKey::local("a")).unwrap().id;
-
-    let report = h.mgr.reconcile(vec![spec("a", 64)]);
-    assert_eq!(report.replaced, vec![PoolKey::local("a")]);
-    let after = h.mgr.live_pool(&PoolKey::local("a")).unwrap();
-    assert_ne!(after.id, id_before);
-    assert_eq!(after.block_size, 64);
-    assert_eq!(h.hooks.retired.lock().unwrap().as_slice(), ["a"]);
-}
-
 /// A retired pool's model claims are released.
 #[tokio::test]
 async fn retiring_releases_the_model_claims() {
     let mut h = harness(eager());
-    h.mgr.reconcile(vec![spec("a", 16)]);
+    h.mgr.reconcile(vec![spec("a")]);
     let id = h.mgr.live_pool(&PoolKey::local("a")).unwrap().id;
     h.models.associate(id, "a", &["gemma".to_string()]);
     assert_eq!(h.models.pools_for("gemma"), vec![id]);
@@ -496,7 +483,7 @@ async fn retiring_releases_the_model_claims() {
 async fn a_failed_create_is_not_published() {
     let mut h = harness(eager());
     *h.hooks.fail_on.lock().unwrap() = Some("bad".to_string());
-    let report = h.mgr.reconcile(vec![spec("good", 16), spec("bad", 16)]);
+    let report = h.mgr.reconcile(vec![spec("good"), spec("bad")]);
     assert_eq!(report.created, vec![PoolKey::local("good")]);
     assert_eq!(report.failed, vec![PoolKey::local("bad")]);
     assert_eq!(h.registry.snapshot().len(), 1);
@@ -510,7 +497,7 @@ async fn churn_leaves_nothing_behind() {
     let mut tokens = Vec::new();
     for i in 0..200 {
         let name = format!("set-{i}");
-        h.mgr.reconcile(vec![spec(&name, 16)]);
+        h.mgr.reconcile(vec![spec(&name)]);
         tokens.push(
             h.mgr
                 .live_pool(&PoolKey::local(&name))

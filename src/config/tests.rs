@@ -27,18 +27,26 @@ fn config_without_worker_sets_fails_validate() {
     assert!(err.to_string().contains("at least one"));
 }
 
+/// A worker set resolves to the same pool spec with any `kv_block_size`
+/// and with none.
 #[test]
-fn workerset_with_zero_block_size_fails_validate() {
-    let cfg = parse(json!({
-        "listen": "127.0.0.1:50051",
-        "profile": [{"name": "t"}],
-        "workerset": [workerset("p", "t", 0, "svc")],
-    }))
-    .expect("parses");
-    let err = cfg
-        .validate()
-        .expect_err("zero kv_block_size should fail validate");
-    assert!(err.to_string().contains("kv_block_size"));
+fn the_block_size_of_a_workerset_is_optional_and_not_read() {
+    let specs = |workerset: Value| {
+        let cfg = parse(json!({
+            "listen": "127.0.0.1:50051",
+            "profile": [{"name": "t"}],
+            "workerset": [workerset],
+        }))
+        .expect("parses");
+        cfg.validate().expect("validates");
+        cfg.pool_specs().expect("resolves")
+    };
+    let absent = specs(json!({
+        "name": "p", "profile": "t", "discovery": {"service_name": "svc"},
+    }));
+    assert_eq!(absent.len(), 1);
+    assert_eq!(specs(workerset("p", "t", 0, "svc")), absent);
+    assert_eq!(specs(workerset("p", "t", 64, "svc")), absent);
 }
 
 #[test]
@@ -201,9 +209,6 @@ fn two_worker_sets_sharing_a_profile_get_identical_tuning() {
     assert_eq!(specs[0].tokenize_mode, TokenizeMode::Local);
     assert_eq!(specs[0].predictor, specs[1].predictor);
     assert_eq!(specs[0].picker, specs[1].picker);
-    // ...but block size stays per set, since it depends on the engines.
-    assert_eq!(specs[0].kv_block_size, 16);
-    assert_eq!(specs[1].kv_block_size, 64);
 }
 
 #[test]

@@ -6,8 +6,8 @@ use serde::Deserialize;
 
 /// A `profile` entry: a named bundle of routing tuning, shared across worker sets.
 ///
-/// `kv_block_size` and the render URL are per-deployment facts, so they live on
-/// the worker set instead.
+/// The render URL is a per-deployment fact, so it lives on the worker set
+/// instead.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProfileConfig {
     /// Referenced by a workerset's `profile`. Must be unique.

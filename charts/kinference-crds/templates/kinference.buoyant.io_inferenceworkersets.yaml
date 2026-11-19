@@ -31,7 +31,7 @@ spec:
           metadata: {type: object}
           spec:
             type: object
-            required: [serviceRef, profile, kvBlockSize]
+            required: [serviceRef, profile]
             properties:
               profile:
                 description: |-
@@ -42,10 +42,8 @@ spec:
                 maxLength: 253
               kvBlockSize:
                 description: |-
-                  Tokens per block in the KV-cache events published by the
-                  engines.  Note this is not necessarily the engine's
-                  --block-size configuration (e.g Gemma 4 reports block_size=64
-                  but publishes 256-token blocks.)
+                  Ignored. KInference learns each worker's block size from
+                  the worker's KV-cache events.
                 type: integer
                 minimum: 1
                 maximum: 4096

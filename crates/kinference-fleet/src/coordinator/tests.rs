@@ -52,7 +52,7 @@ fn worker(num: u64, hint: &str) -> WorkerConfig {
 }
 
 fn pool_with_declared_models(name: &str, models: &[&str]) -> Arc<Pool> {
-    let mut spec = test_spec(name, 16);
+    let mut spec = test_spec(name);
     spec.static_models = Some(models.iter().map(|m| m.to_string()).collect());
     Arc::new(Pool::from_spec(
         PoolId::next(),
@@ -194,7 +194,7 @@ async fn retire_stops_discovery_and_drops_every_worker() {
     let h = harness();
     let pool = test_pool("a");
     h.coordinator
-        .on_create(&pool, &test_spec("a", 16))
+        .on_create(&pool, &test_spec("a"))
         .expect("discovery starts");
     let discovery = h
         .coordinator

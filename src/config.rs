@@ -35,8 +35,8 @@ pub struct Config {
     /// profiles accordingly (`qwen32b-h100-tp2`, not `qwen32b`).
     #[serde(default, rename = "profile")]
     pub profiles: Vec<ProfileConfig>,
-    /// The worker sets this instance manages. Workers within a set share model,
-    /// engine and `kv_block_size`. Requests are routed by `model` through
+    /// The worker sets this instance manages. Workers within a set share model
+    /// and engine. Requests are routed by `model` through
     /// the model index; when several sets serve one model, all are
     /// scored (see `service::best_group`). At least one is required unless
     /// `kubernetes.enabled` is set.
@@ -118,12 +118,11 @@ pub struct WorkerSetConfig {
     pub name: String,
     /// The profile supplying this set's tuning. Required.
     pub profile: String,
-    /// KV-cache block size shared by every worker in the set. A worker
-    /// reporting a different size is evicted.
-    ///
-    /// Typical values: `16` for standard vLLM, `64` for Gemma 3/4, `1` for
-    /// SGLang with `--page-size 1`.
-    pub kv_block_size: u32,
+    /// Not read. Kinference learns each worker's block size from the
+    /// worker's KV events.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub kv_block_size: Option<u32>,
     /// Dedicated `/render` URL (full URL including path). When unset, renders
     /// rotate across the set's own workers.
     #[serde(default)]
@@ -221,7 +220,6 @@ impl Config {
                     key: PoolKey::local(&ws.name),
                     name: ws.name.clone(),
                     profile: profile.name.clone(),
-                    kv_block_size: ws.kv_block_size,
                     predictor: profile.predictor.clone(),
                     picker: profile.picker.clone(),
                     tokenize_mode: profile.tokenize.mode,
@@ -332,9 +330,6 @@ impl Config {
             }
             if !seen_set_names.insert(spec.name.clone()) {
                 anyhow::bail!("duplicate workerset name: {}", spec.name);
-            }
-            if spec.kv_block_size == 0 {
-                anyhow::bail!("workerset {}: kv_block_size must be > 0", spec.name);
             }
             if spec
                 .discovery
