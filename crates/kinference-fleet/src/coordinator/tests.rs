@@ -52,7 +52,7 @@ fn worker(num: u64, hint: &str) -> WorkerConfig {
 }
 
 fn pool_with_declared_models(name: &str, models: &[&str]) -> Arc<Pool> {
-    let mut spec = test_spec(name, 16);
+    let mut spec = test_spec(name);
     spec.static_models = Some(models.iter().map(|m| m.to_string()).collect());
     Arc::new(Pool::from_spec(
         PoolId::next(),
@@ -121,7 +121,7 @@ async fn declared_models_seed_the_worker_and_mark_it_ready() {
     let conflicted = pool_with_declared_models("b", &["mistral"]);
     conflicted
         .registry
-        .register(99, WorkerEntry::from_config(&worker(99, ""), 16));
+        .register(99, WorkerEntry::from_config(&worker(99, "")));
     assert_eq!(
         conflicted
             .registry
@@ -194,7 +194,7 @@ async fn retire_stops_discovery_and_drops_every_worker() {
     let h = harness();
     let pool = test_pool("a");
     h.coordinator
-        .on_create(&pool, &test_spec("a", 16))
+        .on_create(&pool, &test_spec("a"))
         .expect("discovery starts");
     let discovery = h
         .coordinator

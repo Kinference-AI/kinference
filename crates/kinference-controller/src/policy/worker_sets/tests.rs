@@ -48,7 +48,6 @@ fn a_complete_set_resolves_against_its_profile() {
         .get(&PoolKey::namespaced("infra", "workers-h100"))
         .unwrap();
     assert_eq!(spec.profile, "h100");
-    assert_eq!(spec.kv_block_size, 16);
     assert_eq!(spec.tokenize_mode, TokenizeMode::Local);
     assert_eq!(spec.discovery.service_name.as_deref(), Some("vllm"));
     assert_eq!(
@@ -107,18 +106,12 @@ fn an_unknown_profile_is_rejected_and_lists_the_defined_ones() {
 fn a_set_missing_required_fields_is_rejected_without_taking_the_others_down() {
     let mut no_profile = full_spec();
     no_profile.profile = None;
-    let mut no_block = full_spec();
-    no_block.kv_block_size = None;
-    let mut zero_block = full_spec();
-    zero_block.kv_block_size = Some(0);
     let mut no_svc = full_spec();
     no_svc.service_ref.name = String::new();
 
     let (out, rejected) = desired_pools(
         &[
             iws("infra", "bad-profile", no_profile),
-            iws("infra", "bad-block", no_block),
-            iws("infra", "zero-block", zero_block),
             iws("infra", "bad-svc", no_svc),
             iws("infra", "good", full_spec()),
         ],
@@ -131,15 +124,33 @@ fn a_set_missing_required_fields_is_rejected_without_taking_the_others_down() {
         .iter()
         .map(|r| r.reason.as_condition_reason())
         .collect();
-    assert_eq!(
-        reasons,
-        [
-            "MissingProfile",
-            "MissingKvBlockSize",
-            "InvalidKvBlockSize",
-            "MissingServiceRef"
-        ]
-    );
+    assert_eq!(reasons, ["MissingProfile", "MissingServiceRef"]);
+}
+
+/// A worker set resolves to the same pool spec whatever its `kvBlockSize`
+/// says, so a change of the field leaves the worker set's pool in place.
+#[test]
+fn the_block_size_field_is_not_read() {
+    let mut absent = full_spec();
+    absent.kv_block_size = None;
+    let mut zero = full_spec();
+    zero.kv_block_size = Some(0);
+    let mut other = full_spec();
+    other.kv_block_size = Some(64);
+
+    let resolve = |spec| {
+        let (mut out, rejected) = desired_pools(
+            &[iws("infra", "ws", spec)],
+            &[profile("h100")],
+            &DiscoveryDefaults::default(),
+        );
+        assert!(rejected.is_empty(), "{rejected:?}");
+        out.remove(&PoolKey::namespaced("infra", "ws")).unwrap()
+    };
+    let with_16 = resolve(full_spec());
+    assert_eq!(resolve(absent), with_16);
+    assert_eq!(resolve(zero), with_16);
+    assert_eq!(resolve(other), with_16);
 }
 
 /// A model row without a `name` must still parse, since `watcher`

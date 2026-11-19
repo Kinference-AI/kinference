@@ -90,20 +90,6 @@ pub fn desired_pools(
             });
             continue;
         };
-        let Some(block_size) = spec.kv_block_size else {
-            rejected.push(Rejection {
-                key,
-                reason: RejectReason::MissingKvBlockSize,
-            });
-            continue;
-        };
-        if block_size == 0 {
-            rejected.push(Rejection {
-                key,
-                reason: RejectReason::InvalidKvBlockSize { got: block_size },
-            });
-            continue;
-        }
         if spec.service_ref.name.trim().is_empty() {
             rejected.push(Rejection {
                 key,
@@ -134,7 +120,6 @@ pub fn desired_pools(
             PoolSpec {
                 name: key.to_string(),
                 profile: profile.name.clone(),
-                kv_block_size: block_size,
                 predictor: profile.predictor.clone(),
                 picker: profile.picker.clone(),
                 tokenize_mode: profile.tokenize.mode,
@@ -406,7 +391,6 @@ impl WorkerSetWatcher {
                 created = ?report.created,
                 resurrected = ?report.resurrected,
                 updated = ?report.updated,
-                replaced = ?report.replaced,
                 retired = ?report.retired,
                 failed = ?report.failed,
                 live = self.manager.live_keys().len(),

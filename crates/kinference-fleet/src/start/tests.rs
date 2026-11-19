@@ -8,7 +8,7 @@ use crate::pool::test_spec;
 
 fn config(name: &str) -> FleetConfig {
     FleetConfig {
-        specs: vec![test_spec(name, 16)],
+        specs: vec![test_spec(name)],
         workers: WorkerTaskSettings {
             poll_ms: 1000,
             models_refresh_secs: 30,

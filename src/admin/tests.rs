@@ -9,7 +9,11 @@ fn ready_entry() -> WorkerEntry {
         model_name_hint: Some("gemma".into()),
         current_models: vec!["gemma".into()],
         http_url: Some("http://10.0.0.1:8000/".into()),
-        block_size: 16,
+        indexed_group: Some(kinference_fleet::workers::IndexedGroup {
+            group_idx: 0,
+            kind: None,
+            block_size: 16,
+        }),
         initial_sync_complete: true,
         kv_events_observed: true,
         score_addr: "10.0.0.1:8000".into(),
@@ -21,6 +25,21 @@ fn ready_entry() -> WorkerEntry {
         pod_ip: None,
         availability_zone: None,
         instance_type: None,
+    }
+}
+
+/// A ready worker at `addr` whose indexed group has `block_size`.
+fn entry_at(addr: &str, block_size: Option<u32>) -> WorkerEntry {
+    WorkerEntry {
+        worker_id_str: addr.into(),
+        http_url: Some(format!("http://{addr}/")),
+        score_addr: addr.into(),
+        indexed_group: block_size.map(|block_size| kinference_fleet::workers::IndexedGroup {
+            group_idx: 0,
+            kind: Some(kinference_fleet::workers::AttentionKind::Full),
+            block_size,
+        }),
+        ..ready_entry()
     }
 }
 
@@ -799,10 +818,15 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
         status: None,
     });
 
-    // Two live pools with different block sizes, so `total_blocks` and the
-    // prefill term differ for one prompt.
-    let big = kinference_fleet::pool::test_pool_with_block_size("big-blocks", 256);
-    let small = kinference_fleet::pool::test_pool_with_block_size("small-blocks", 16);
+    // Two live pools whose workers have different block sizes, so
+    // `total_blocks` and the prefill term differ for one prompt.
+    let big = pool("big-blocks");
+    big.registry
+        .register(1, entry_at("10.0.0.1:8000", Some(256)));
+    let small = pool("small-blocks");
+    small
+        .registry
+        .register(2, entry_at("10.0.0.2:8000", Some(16)));
     let (big_id, small_id) = (big.id, small.id);
     let pools = PoolRegistry::new();
     pools.publish(Arc::new(kinference_fleet::pool::PoolMap::from_pools(vec![
@@ -881,6 +905,55 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
         note.contains("no worker set named `invented`"),
         "a synthesized worker borrows a predictor and must say whose: {note}"
     );
+}
+
+/// A destination's `indexedGroups` has one entry per distinct kind and block
+/// size among the workers' indexed groups, with the worker count.
+#[test]
+fn indexed_groups_count_the_workers_of_each_group() {
+    let live = pool("mixed");
+    live.registry
+        .register(1, entry_at("10.0.0.1:8000", Some(16)));
+    live.registry
+        .register(2, entry_at("10.0.0.2:8000", Some(64)));
+    live.registry
+        .register(3, entry_at("10.0.0.3:8000", Some(16)));
+    live.registry.register(4, entry_at("10.0.0.4:8000", None));
+
+    assert_eq!(
+        policy_api::indexed_groups_json(&live),
+        serde_json::json!([
+            {"kind": "full_attention", "blockSize": 16, "workers": 2},
+            {"kind": "full_attention", "blockSize": 64, "workers": 1},
+        ])
+    );
+}
+
+/// `simulate` counts a candidate's blocks at the block size of the worker
+/// that the candidate's endpoint names, and otherwise at the block size that
+/// most workers of the worker set have.
+#[test]
+fn a_candidate_gets_the_block_size_of_its_endpoints_worker() {
+    let live = pool("mixed");
+    assert_eq!(policy_api::candidate_block_size(&live, None), None);
+
+    live.registry
+        .register(1, entry_at("10.0.0.1:8000", Some(64)));
+    live.registry
+        .register(2, entry_at("10.0.0.2:8000", Some(16)));
+    live.registry.register(3, entry_at("10.0.0.3:8000", None));
+    let size = |endpoint| policy_api::candidate_block_size(&live, endpoint);
+
+    assert_eq!(size(Some("10.0.0.1:8000")), Some(64));
+    assert_eq!(size(Some("http://10.0.0.2:8000/")), Some(16));
+    // One worker has each size, so the smaller size wins.
+    assert_eq!(size(Some("10.0.0.9:8000")), Some(16));
+    assert_eq!(size(Some("10.0.0.3:8000")), Some(16));
+    assert_eq!(size(None), Some(16));
+
+    live.registry
+        .register(4, entry_at("10.0.0.4:8000", Some(64)));
+    assert_eq!(size(None), Some(64));
 }
 
 /// `kvCacheUsage` filters end to end, including where it disagrees with
@@ -1431,7 +1504,10 @@ async fn context_seeds_post_back_to_simulate_unchanged() {
     );
     assert_eq!(pool["destinations"][0]["name"], "gemma-4-12b");
     assert_eq!(pool["destinations"][0]["type"], "Local");
-    assert!(pool["destinations"][0]["blockSize"].is_u64(), "{pool}");
+    assert_eq!(
+        pool["destinations"][0]["indexedGroups"],
+        serde_json::json!([{"kind": null, "blockSize": 16, "workers": 1}])
+    );
     assert_eq!(
         pool["destinations"][0]["declaredModels"],
         serde_json::json!(["gemma-4", "google/gemma-4-12B-it"])

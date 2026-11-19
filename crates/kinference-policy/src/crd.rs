@@ -65,21 +65,8 @@ pub struct InferenceWorkerSetSpec {
     /// Required by the schema; see the module docs for why it is `Option`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
-    /// Tokens per block in the KV-cache events these engines publish.
-    ///
-    /// Not necessarily the engine's `--block-size`. They coincide for standard
-    /// vLLM (16), but Gemma 4 reports `block_size="64"` in
-    /// `vllm:cache_config_info` while publishing 256-token blocks, and SGLang
-    /// `--page-size 1` publishes 1. On a mismatch, Kinference logs a WARN
-    /// line with the block size of the engine's events.
-    ///
-    /// With a wrong value, Kinference skips the mismatched events, so the
-    /// prefix tree stays empty and picks degrade to load-only. The workers
-    /// stay in service. `kinference_kv_events_skipped_total` counts the
-    /// skipped events under `reason="block_size_mismatch"`, and the
-    /// removals that follow them under `reason="nothing_stored"`.
-    ///
-    /// Required by the schema; see the module docs for why it is `Option`.
+    /// Not read. Kinference learns each worker's block size from the
+    /// worker's KV events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_block_size: Option<u32>,
     /// Where Prometheus metrics are served, if not on the OpenAI port.

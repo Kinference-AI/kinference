@@ -53,7 +53,7 @@ impl ServiceBuilder {
             pools: Vec::new(),
             providers: Vec::new(),
             policy: Policy::ListedEmpty,
-            // Two full blocks at the test pools' block size of 16.
+            // Two full blocks at the test workers' block size of 16.
             render: Render::Tokens((1..=32).collect()),
         }
     }
@@ -135,7 +135,7 @@ impl ServiceBuilder {
         for f in &self.pools {
             // Keyed as a CRD worker set's pool is, so the policy snapshot can
             // bind to it.
-            let mut spec = test_spec(&f.name, 16);
+            let mut spec = test_spec(&f.name);
             spec.key = PoolKey::namespaced("default", &f.name);
             spec.name = spec.key.to_string();
             let p = Arc::new(Pool::from_spec(

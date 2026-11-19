@@ -148,12 +148,10 @@ impl Coordinator {
     /// cancel token, and kick a one-shot `/v1/models` scrape so the worker
     /// is routable before the next periodic tick.
     fn add_worker(&self, pool: &Arc<Pool>, w: WorkerConfig) {
-        let block_size = pool.block_size;
         let registry = &pool.registry;
         tracing::info!(
             workerset = pool.name,
             worker_id = w.worker_id_str,
-            block_size,
             zmq_endpoint = w.zmq_endpoint.as_deref().unwrap_or("-"),
             http_url = w.http_url.as_deref().unwrap_or("-"),
             "worker added"
@@ -184,7 +182,7 @@ impl Coordinator {
 
         // Seeded from config.model_name; `by_model` is updated by the
         // metrics poller and warmup.
-        let entry = WorkerEntry::from_config(&w, block_size);
+        let entry = WorkerEntry::from_config(&w);
         // The key the pick path uses for inflight state, which the ZMQ
         // listener also keys `on_stored` by.
         let endpoint_key = entry.score_addr.clone();
@@ -252,7 +250,6 @@ impl Coordinator {
             endpoint_key,
             pool_id: pool.id,
             pool_name: pool.name.clone(),
-            block_size,
             registry: registry.clone(),
             indexer: pool.indexer.clone(),
             inflight_prefixes: pool.inflight_prefixes.clone(),

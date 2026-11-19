@@ -2,7 +2,8 @@ use super::*;
 
 use std::sync::Arc;
 
-use dynamo_kv_router::zmq_wire::{BlockHashValue, KvCacheSpecKind};
+use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
+use dynamo_kv_router::zmq_wire::BlockHashValue;
 use prometheus::{Encoder, Registry, TextEncoder};
 use tokio_util::sync::CancellationToken;
 
@@ -10,65 +11,96 @@ use crate::discovery::WorkerConfig;
 use crate::eviction::{self, EvictionRx};
 use crate::metrics::FleetMetrics;
 use crate::models::ModelIndex;
-use crate::pool::test_pool;
+use crate::pool::{Pool, test_pool};
+use crate::workers::WorkerEntry;
 
-/// A worker context in the worker set "set-a", whose `kvBlockSize` is 16.
-fn context() -> (WorkerContext, Registry, EvictionRx) {
-    let pool = test_pool("set-a");
-    let registry = Registry::new();
+const FULL: Option<KvCacheSpecKind> = Some(KvCacheSpecKind::FullAttention);
+
+/// The context of worker `num`, registered in `pool`.
+fn worker_context(pool: &Pool, num: u64, prom: &Arc<FleetMetrics>) -> (WorkerContext, EvictionRx) {
+    let cfg = WorkerConfig {
+        worker_id_str: format!("w-{num}"),
+        worker_id_num: num,
+        ..Default::default()
+    };
+    pool.registry.register(num, WorkerEntry::from_config(&cfg));
     let (eviction_tx, evictions) = eviction::channel();
     let ctx = WorkerContext {
-        cfg: WorkerConfig {
-            worker_id_str: "w-1".into(),
-            worker_id_num: 1,
-            ..Default::default()
-        },
-        endpoint_key: "10.0.0.1:8000".into(),
+        cfg,
+        endpoint_key: format!("10.0.0.{num}:8000"),
         pool_id: pool.id,
         pool_name: pool.name.clone(),
-        block_size: pool.block_size,
         registry: pool.registry.clone(),
         indexer: pool.indexer.clone(),
         inflight_prefixes: pool.inflight_prefixes.clone(),
-        prom: Arc::new(FleetMetrics::new(&registry)),
+        prom: prom.clone(),
         models: Arc::new(ModelIndex::new()),
         eviction_tx,
         cancel: CancellationToken::new(),
     };
+    (ctx, evictions)
+}
+
+/// The context of worker 1 in the worker set "set-a".
+fn context() -> (WorkerContext, Registry, EvictionRx) {
+    let pool = test_pool("set-a");
+    let registry = Registry::new();
+    let prom = Arc::new(FleetMetrics::new(&registry));
+    let (ctx, evictions) = worker_context(&pool, 1, &prom);
     (ctx, registry, evictions)
 }
 
-/// One `BlockStored` event with a single block of `block_size` tokens.
-fn stored(hash: u64, block_size: usize, kind: Option<KvCacheSpecKind>) -> RawKvEvent {
+/// The first `n` token IDs of the prompt that starts at `first`.
+fn prompt(first: u32, n: usize) -> Vec<u32> {
+    (first..first + n as u32).collect()
+}
+
+/// One `BlockStored` event with a single block: the first `block_size`
+/// tokens of the prompt that starts at `first`.
+fn stored_in(
+    hash: u64,
+    first: u32,
+    block_size: usize,
+    group_idx: Option<u32>,
+    kind: Option<KvCacheSpecKind>,
+) -> RawKvEvent {
     RawKvEvent::BlockStored {
         block_hashes: vec![BlockHashValue::Unsigned(hash)],
         parent_block_hash: None,
-        token_ids: (0..block_size as u32).collect(),
+        token_ids: prompt(first, block_size),
         block_size,
         medium: None,
         lora_name: None,
         block_mm_infos: None,
         is_eagle: None,
-        group_idx: None,
+        group_idx,
+        kv_cache_spec_kind: kind,
+        kv_cache_spec_sliding_window: None,
+    }
+}
+
+/// A `BlockStored` event that names no group, as an older vLLM sends it.
+fn stored(hash: u64, block_size: usize, kind: Option<KvCacheSpecKind>) -> RawKvEvent {
+    stored_in(hash, 0, block_size, None, kind)
+}
+
+fn removed_in(hash: u64, group_idx: Option<u32>, kind: Option<KvCacheSpecKind>) -> RawKvEvent {
+    RawKvEvent::BlockRemoved {
+        block_hashes: vec![BlockHashValue::Unsigned(hash)],
+        medium: None,
+        group_idx,
         kv_cache_spec_kind: kind,
         kv_cache_spec_sliding_window: None,
     }
 }
 
 fn removed(hash: u64) -> RawKvEvent {
-    RawKvEvent::BlockRemoved {
-        block_hashes: vec![BlockHashValue::Unsigned(hash)],
-        medium: None,
-        group_idx: None,
-        kv_cache_spec_kind: None,
-        kv_cache_spec_sliding_window: None,
-    }
+    removed_in(hash, None, None)
 }
 
 async fn apply(ctx: &WorkerContext, memory: &mut WorkerMemory, events: Vec<RawKvEvent>) {
     let mut state = ListenerState {
         cursor: CursorState::Initial,
-        normalizer: ZmqEventNormalizer::new(ctx.block_size),
         memory,
         warned: ListenerWarnings::default(),
     };
@@ -78,6 +110,28 @@ async fn apply(ctx: &WorkerContext, memory: &mut WorkerMemory, events: Vec<RawKv
         data_parallel_rank: None,
     };
     apply_batch(ctx, &mut state, 0, batch).await;
+}
+
+/// How many blocks of the prompt that starts at `first` the radix tree
+/// holds for the worker, when the lookup cuts the prompt at `block_size`.
+async fn matched(ctx: &WorkerContext, first: u32, block_size: u32) -> u32 {
+    ctx.indexer.flush().await;
+    let hashes =
+        compute_block_hash_for_seq(&prompt(first, 256), block_size, BlockHashOptions::default());
+    let overlap = ctx.indexer.find_matches(hashes).await.unwrap();
+    overlap
+        .scores
+        .iter()
+        .filter(|(w, _)| w.worker_id == ctx.cfg.worker_id_num)
+        .map(|(_, n)| *n)
+        .sum()
+}
+
+fn indexed_group(ctx: &WorkerContext) -> Option<IndexedGroup> {
+    ctx.registry
+        .lookup(ctx.cfg.worker_id_num)
+        .unwrap()
+        .indexed_group
 }
 
 fn render(registry: &Registry) -> String {
@@ -92,34 +146,191 @@ fn has_line(registry: &Registry, line: &str) -> bool {
     render(registry).lines().any(|l| l == line)
 }
 
-/// Ingest skips and counts events at another block size, requests no
-/// eviction, and indexes the matching event that follows.
+/// `classify` follows the rule for the indexed group: the lowest group index
+/// wins, and the group's largest block size wins.
+#[test]
+fn classify_selects_the_lowest_group_at_its_largest_block_size() {
+    let indexed = Some(IndexedGroup {
+        group_idx: 1,
+        kind: None,
+        block_size: 32,
+    });
+
+    assert_eq!(classify(None, 1, 32), Verdict::Select);
+    assert_eq!(classify(indexed, 1, 32), Verdict::Index);
+    assert_eq!(
+        classify(indexed, 1, 16),
+        Verdict::Skip(SKIP_BLOCK_SIZE_MISMATCH)
+    );
+    assert_eq!(classify(indexed, 1, 64), Verdict::Select);
+    // A lower group takes over at any block size.
+    assert_eq!(classify(indexed, 0, 16), Verdict::Select);
+    assert_eq!(classify(indexed, 0, 64), Verdict::Select);
+    // A higher group is skipped at any block size.
+    assert_eq!(
+        classify(indexed, 2, 16),
+        Verdict::Skip(SKIP_UNINDEXED_GROUP)
+    );
+    assert_eq!(
+        classify(indexed, 2, 64),
+        Verdict::Skip(SKIP_UNINDEXED_GROUP)
+    );
+}
+
+/// The worker's first `BlockStored` event sets the worker's block size, and
+/// ingest indexes the event at that size.
 #[tokio::test]
-async fn a_block_size_mismatch_is_skipped_and_counted() {
+async fn the_first_stored_event_sets_the_block_size() {
+    let (ctx, registry, _evictions) = context();
+    let mut memory = WorkerMemory::default();
+    assert_eq!(indexed_group(&ctx), None);
+
+    apply(&ctx, &mut memory, vec![stored(1, 32, None)]).await;
+
+    let group = IndexedGroup {
+        group_idx: 0,
+        kind: None,
+        block_size: 32,
+    };
+    assert_eq!(indexed_group(&ctx), Some(group));
+    assert_eq!(matched(&ctx, 0, 32).await, 1);
+    assert!(!render(&registry).contains("kinference_kv_events_skipped_total{"));
+}
+
+/// Ingest skips and counts an event of the indexed group at a smaller block
+/// size, keeps the worker's block size and requests no eviction.
+#[tokio::test]
+async fn a_smaller_block_size_is_skipped_and_counted() {
     let (ctx, registry, mut evictions) = context();
     let mut memory = WorkerMemory::default();
     let events = vec![
         stored(1, 32, None),
-        stored(2, 32, None),
-        stored(3, 32, None),
-        stored(4, 32, None),
-        stored(5, 16, None),
+        stored(2, 16, None),
+        stored(3, 16, None),
     ];
     apply(&ctx, &mut memory, events).await;
 
     assert!(has_line(
         &registry,
-        "kinference_kv_events_skipped_total{reason=\"block_size_mismatch\",workerset=\"set-a\"} 4"
+        "kinference_kv_events_skipped_total{reason=\"block_size_mismatch\",workerset=\"set-a\"} 2"
     ));
     assert!(has_line(
         &registry,
         "kinference_index_events_total{kind=\"stored\"} 1"
     ));
+    assert_eq!(indexed_group(&ctx).unwrap().block_size, 32);
     assert!(evictions.try_recv().is_err());
 }
 
+/// A larger block size of the indexed group replaces the worker's block
+/// size, and ingest first clears the worker's blocks.
+#[tokio::test]
+async fn a_larger_block_size_clears_the_worker_and_takes_over() {
+    let (ctx, registry, _evictions) = context();
+    let mut memory = WorkerMemory::default();
+    apply(&ctx, &mut memory, vec![stored_in(1, 0, 16, Some(0), FULL)]).await;
+    assert_eq!(matched(&ctx, 0, 16).await, 1);
+
+    apply(
+        &ctx,
+        &mut memory,
+        vec![stored_in(2, 1000, 64, Some(0), FULL)],
+    )
+    .await;
+
+    assert_eq!(indexed_group(&ctx).unwrap().block_size, 64);
+    assert_eq!(matched(&ctx, 0, 16).await, 0);
+    assert_eq!(matched(&ctx, 1000, 64).await, 1);
+    assert!(has_line(
+        &registry,
+        "kinference_index_events_total{kind=\"cleared\"} 1"
+    ));
+}
+
+/// The first `BlockStored` event of a group with a lower index makes that
+/// group the indexed group, and ingest then skips the other group's events.
+#[tokio::test]
+async fn a_lower_group_takes_over() {
+    let (ctx, registry, _evictions) = context();
+    let mut memory = WorkerMemory::default();
+    apply(&ctx, &mut memory, vec![stored_in(1, 0, 16, Some(1), FULL)]).await;
+    assert_eq!(indexed_group(&ctx).unwrap().group_idx, 1);
+
+    let events = vec![
+        stored_in(2, 1000, 64, Some(0), FULL),
+        stored_in(3, 2000, 16, Some(1), FULL),
+    ];
+    apply(&ctx, &mut memory, events).await;
+
+    let group = IndexedGroup {
+        group_idx: 0,
+        kind: Some(AttentionKind::Full),
+        block_size: 64,
+    };
+    assert_eq!(indexed_group(&ctx), Some(group));
+    assert_eq!(matched(&ctx, 0, 16).await, 0);
+    assert_eq!(matched(&ctx, 1000, 64).await, 1);
+    assert!(has_line(
+        &registry,
+        "kinference_kv_events_skipped_total{reason=\"unindexed_attention_group\",workerset=\"set-a\"} 1"
+    ));
+}
+
+/// A stored block and a removal of a second main attention group leave the
+/// indexed group's block in the radix tree, and both events are counted.
+/// vLLM gives the block of both groups the same engine hash.
+#[tokio::test]
+async fn events_of_a_second_main_group_are_skipped_and_counted() {
+    let (ctx, registry, _evictions) = context();
+    let mut memory = WorkerMemory::default();
+    let events = vec![
+        stored_in(1, 0, 16, Some(0), FULL),
+        stored_in(1, 0, 64, Some(1), FULL),
+    ];
+    apply(&ctx, &mut memory, events).await;
+    assert_eq!(matched(&ctx, 0, 16).await, 1);
+
+    apply(&ctx, &mut memory, vec![removed_in(1, Some(1), FULL)]).await;
+
+    assert_eq!(matched(&ctx, 0, 16).await, 1);
+    assert_eq!(matched(&ctx, 0, 64).await, 0);
+    assert!(has_line(
+        &registry,
+        "kinference_kv_events_skipped_total{reason=\"unindexed_attention_group\",workerset=\"set-a\"} 2"
+    ));
+    assert!(has_line(
+        &registry,
+        "kinference_index_blocks_removed_total 0"
+    ));
+
+    apply(&ctx, &mut memory, vec![removed_in(1, Some(0), FULL)]).await;
+    assert_eq!(matched(&ctx, 0, 16).await, 0);
+}
+
+/// Two workers of one worker set publish different block sizes, and the
+/// radix tree holds each worker's blocks at the worker's own size.
+#[tokio::test]
+async fn two_workers_of_one_worker_set_keep_their_own_block_sizes() {
+    let pool = test_pool("set-a");
+    let prom = Arc::new(FleetMetrics::new(&Registry::new()));
+    let (small, _e1) = worker_context(&pool, 1, &prom);
+    let (large, _e2) = worker_context(&pool, 2, &prom);
+
+    let mut memory = WorkerMemory::default();
+    apply(&small, &mut memory, vec![stored(1, 16, None)]).await;
+    let mut memory = WorkerMemory::default();
+    apply(&large, &mut memory, vec![stored(1, 64, None)]).await;
+
+    assert_eq!(indexed_group(&small).unwrap().block_size, 16);
+    assert_eq!(indexed_group(&large).unwrap().block_size, 64);
+    assert_eq!(matched(&small, 0, 16).await, 1);
+    assert_eq!(matched(&large, 0, 16).await, 0);
+    assert_eq!(matched(&small, 0, 64).await, 0);
+    assert_eq!(matched(&large, 0, 64).await, 1);
+}
+
 /// An event of a non-main attention group is skipped by design, so the
-/// skip counter doesn't count it.
+/// skip counter doesn't count it and the worker gets no block size from it.
 #[tokio::test]
 async fn a_non_main_attention_event_is_not_counted() {
     let (ctx, registry, _evictions) = context();
@@ -128,7 +339,7 @@ async fn a_non_main_attention_event_is_not_counted() {
     apply(&ctx, &mut memory, events).await;
 
     assert!(!render(&registry).contains("kinference_kv_events_skipped_total{"));
-    assert!(memory.warned_block_sizes.is_empty());
+    assert_eq!(indexed_group(&ctx), None);
 }
 
 /// An event of an attention group that ingest can't classify counts under
@@ -146,32 +357,8 @@ async fn an_unknown_kind_event_is_counted_under_its_own_reason() {
     ));
 }
 
-/// Each mismatching block size is recorded for the WARN line once, up to
-/// the cap.
-#[tokio::test]
-async fn each_mismatching_block_size_warns_once_up_to_the_cap() {
-    let (ctx, _registry, _evictions) = context();
-    let mut memory = WorkerMemory::default();
-    apply(
-        &ctx,
-        &mut memory,
-        vec![
-            stored(1, 32, None),
-            stored(2, 32, None),
-            stored(3, 64, None),
-        ],
-    )
-    .await;
-    assert_eq!(memory.warned_block_sizes, [32, 64]);
-
-    let garbage = (100..120).map(|n| stored(n, n as usize, None)).collect();
-    apply(&ctx, &mut memory, garbage).await;
-    assert_eq!(memory.warned_block_sizes.len(), MAX_WARNED_BLOCK_SIZES);
-    assert!(memory.warned_block_size_cap);
-}
-
-/// An implausible block size counts under its own reason and takes no slot
-/// in the list of warned sizes.
+/// An implausible block size counts under its own reason and gives the
+/// worker no block size.
 #[tokio::test]
 async fn an_implausible_block_size_is_counted_under_its_own_reason() {
     let (ctx, registry, _evictions) = context();
@@ -188,7 +375,7 @@ async fn an_implausible_block_size_is_counted_under_its_own_reason() {
         "kinference_kv_events_skipped_total{reason=\"implausible_block_size\",workerset=\"set-a\"} 2"
     ));
     assert!(memory.warned_implausible_block_size);
-    assert!(memory.warned_block_sizes.is_empty());
+    assert_eq!(indexed_group(&ctx), None);
 }
 
 /// Ingest skips a removal from a worker that has no indexed block, and
@@ -197,7 +384,7 @@ async fn an_implausible_block_size_is_counted_under_its_own_reason() {
 async fn a_removal_is_skipped_until_a_stored_block_is_indexed() {
     let (ctx, registry, _evictions) = context();
     let mut memory = WorkerMemory::default();
-    apply(&ctx, &mut memory, vec![stored(1, 32, None), removed(1)]).await;
+    apply(&ctx, &mut memory, vec![removed(1)]).await;
 
     assert!(has_line(
         &registry,
@@ -215,6 +402,27 @@ async fn a_removal_is_skipped_until_a_stored_block_is_indexed() {
         &registry,
         "kinference_index_blocks_removed_total 1"
     ));
+}
+
+/// After a reconnect, ingest still applies a removal that names the indexed
+/// group by index alone, when that index is above 0.
+#[tokio::test]
+async fn a_removal_without_a_kind_is_applied_after_a_reconnect() {
+    let (ctx, registry, _evictions) = context();
+    let mut memory = WorkerMemory::default();
+    let events = vec![
+        stored_in(1, 0, 4, Some(0), Some(KvCacheSpecKind::SlidingWindow)),
+        stored_in(1, 0, 16, Some(1), FULL),
+    ];
+    apply(&ctx, &mut memory, events).await;
+    assert_eq!(indexed_group(&ctx).unwrap().group_idx, 1);
+    assert_eq!(matched(&ctx, 0, 16).await, 1);
+
+    // A second `apply` builds a new listener state, as a reconnect does.
+    apply(&ctx, &mut memory, vec![removed_in(1, Some(1), None)]).await;
+
+    assert_eq!(matched(&ctx, 0, 16).await, 0);
+    assert!(!render(&registry).contains("kinference_kv_events_skipped_total{"));
 }
 
 #[test]

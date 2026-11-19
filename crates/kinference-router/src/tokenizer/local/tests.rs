@@ -566,7 +566,7 @@ fn render_diff_across_turns() {
 #[test]
 fn warmup_skips_only_render_mode_pools() {
     let process = tokio_util::sync::CancellationToken::new();
-    let mut spec = kinference_fleet::pool::test_spec("a", 16);
+    let mut spec = kinference_fleet::pool::test_spec("a");
     for (mode, warm) in [
         (TokenizeMode::Render, false),
         (TokenizeMode::Local, true),

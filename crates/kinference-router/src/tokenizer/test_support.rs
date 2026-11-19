@@ -111,7 +111,11 @@ pub(crate) fn worker(
         model_name_hint: Some(model.into()),
         current_models: vec![model.into()],
         http_url,
-        block_size: 16,
+        indexed_group: Some(kinference_fleet::workers::IndexedGroup {
+            group_idx: 0,
+            kind: None,
+            block_size: 16,
+        }),
         initial_sync_complete: ready,
         kv_events_observed: true,
         score_addr: addr.into(),

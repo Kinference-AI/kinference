@@ -1,12 +1,12 @@
 use super::*;
 
-fn entry(num: u64, block_size: u32, model: &str) -> WorkerEntry {
+fn entry(num: u64, model: &str) -> WorkerEntry {
     WorkerEntry {
         worker_id_str: format!("w-{num}"),
         model_name_hint: Some(model.to_string()),
         current_models: vec![model.to_string()],
         http_url: Some(format!("http://10.0.0.{num}:8000/")),
-        block_size,
+        indexed_group: None,
         initial_sync_complete: false,
         kv_events_observed: false,
         score_addr: format!("10.0.0.{num}:8000"),
@@ -21,20 +21,26 @@ fn entry(num: u64, block_size: u32, model: &str) -> WorkerEntry {
     }
 }
 
+/// A worker has no block size until ingest records its indexed group.
 #[test]
-fn register_uses_seeded_block_size() {
-    // block_size is set at construction and never mutated by the registry;
-    // a mismatching worker is evicted by ingest.
+fn the_indexed_group_gives_the_worker_its_block_size() {
     let reg = WorkerRegistry::new();
-    reg.register(1, entry(1, 64, "qwen"));
-    reg.register(2, entry(2, 64, "qwen"));
-    assert_eq!(reg.lookup(1).unwrap().block_size, 64);
-    assert_eq!(reg.lookup(2).unwrap().block_size, 64);
+    reg.register(1, entry(1, "qwen"));
+    assert_eq!(reg.lookup(1).unwrap().block_size(), None);
+
+    let group = IndexedGroup {
+        group_idx: 0,
+        kind: Some(AttentionKind::Full),
+        block_size: 64,
+    };
+    reg.set_indexed_group(1, group);
+    assert_eq!(reg.lookup(1).unwrap().indexed_group, Some(group));
+    assert_eq!(reg.lookup(1).unwrap().block_size(), Some(64));
 }
 
 #[test]
 fn worker_is_not_ready_at_construction() {
-    let e = entry(1, 16, "qwen");
+    let e = entry(1, "qwen");
     // entry() sets current_models; reset it to mirror a fresh worker.
     let fresh = WorkerEntry {
         current_models: Vec::new(),
@@ -45,10 +51,29 @@ fn worker_is_not_ready_at_construction() {
     assert!(!fresh.is_ready());
 }
 
+/// The most common block size ignores workers without one, and the smaller
+/// size wins a tie.
+#[test]
+fn the_most_common_block_size_breaks_a_tie_towards_the_smaller_size() {
+    let at = |num, block_size: Option<u32>| WorkerEntry {
+        indexed_group: block_size.map(|block_size| IndexedGroup {
+            group_idx: 0,
+            kind: None,
+            block_size,
+        }),
+        ..entry(num, "qwen")
+    };
+    assert_eq!(most_common_block_size(&[at(1, None)]), None);
+
+    let mut workers = vec![at(1, Some(64)), at(2, Some(16)), at(3, None)];
+    assert_eq!(most_common_block_size(&workers), Some(16));
+    workers.push(at(4, Some(64)));
+    assert_eq!(most_common_block_size(&workers), Some(64));
+}
+
 #[test]
 fn worker_ready_requires_both_signals() {
-    // Readiness is `initial_sync_complete && !current_models.is_empty()`;
-    // block_size is not a readiness signal.
+    // Readiness is `initial_sync_complete && !current_models.is_empty()`.
     let cases: Vec<(&str, bool, bool, bool)> = vec![
         // (label, sync, models_present, expected_ready)
         ("none", false, false, false),
@@ -57,7 +82,7 @@ fn worker_ready_requires_both_signals() {
         ("both", true, true, true),
     ];
     for (label, sync, models, expected) in cases {
-        let mut e = entry(1, 16, "qwen");
+        let mut e = entry(1, "qwen");
         e.initial_sync_complete = sync;
         e.current_models = if models {
             vec!["qwen".into()]
@@ -71,7 +96,7 @@ fn worker_ready_requires_both_signals() {
 #[test]
 fn set_initial_sync_complete_updates_existing_entry() {
     let reg = WorkerRegistry::new();
-    reg.register(1, entry(1, 16, "qwen"));
+    reg.register(1, entry(1, "qwen"));
     assert!(!reg.lookup(1).unwrap().initial_sync_complete);
     assert!(reg.set_initial_sync_complete(1));
     assert!(reg.lookup(1).unwrap().initial_sync_complete);
@@ -89,8 +114,8 @@ fn set_initial_sync_complete_on_missing_worker_returns_false() {
 #[test]
 fn any_ready_returns_true_when_at_least_one_ready() {
     let reg = WorkerRegistry::new();
-    reg.register(1, entry(1, 16, "qwen"));
-    reg.register(2, entry(2, 16, "gemma"));
+    reg.register(1, entry(1, "qwen"));
+    reg.register(2, entry(2, "gemma"));
     // current_models is set via entry(); flip sync on worker 2 only.
     reg.set_initial_sync_complete(2);
     assert!(
@@ -110,25 +135,25 @@ fn any_ready_returns_true_when_at_least_one_ready() {
 #[test]
 fn any_ready_returns_false_when_none_ready() {
     let reg = WorkerRegistry::new();
-    reg.register(1, entry(1, 16, "qwen"));
+    reg.register(1, entry(1, "qwen"));
     // No worker has set initial_sync_complete yet.
     assert!(!reg.any_ready(), "no ready workers → any_ready false");
 }
 
 /// A WorkerEntry with empty `current_models`, so the first
 /// `set_served_models` call pins canonical.
-fn empty_entry(num: u64, block_size: u32) -> WorkerEntry {
+fn empty_entry(num: u64) -> WorkerEntry {
     WorkerEntry {
         current_models: Vec::new(),
         model_name_hint: None,
-        ..entry(num, block_size, "ignored")
+        ..entry(num, "ignored")
     }
 }
 
 #[test]
 fn set_served_models_first_call_pins_canonical_and_returns_accepted() {
     let reg = WorkerRegistry::new();
-    reg.register(1, empty_entry(1, 64));
+    reg.register(1, empty_entry(1));
     let verdict = reg.set_served_models(1, &["gemma".into()]);
     assert_eq!(verdict, ServedModelsVerdict::Accepted);
     // The canonical set must reflect the first non-empty report.
@@ -140,8 +165,8 @@ fn set_served_models_first_call_pins_canonical_and_returns_accepted() {
 #[test]
 fn set_served_models_matching_returns_accepted() {
     let reg = WorkerRegistry::new();
-    reg.register(1, empty_entry(1, 64));
-    reg.register(2, empty_entry(2, 64));
+    reg.register(1, empty_entry(1));
+    reg.register(2, empty_entry(2));
     assert_eq!(
         reg.set_served_models(1, &["gemma".into()]),
         ServedModelsVerdict::Accepted
@@ -158,8 +183,8 @@ fn set_served_models_matching_returns_accepted() {
 #[test]
 fn a_worker_that_gained_a_model_widens_the_set_instead_of_being_evicted() {
     let reg = WorkerRegistry::new();
-    reg.register(1, empty_entry(1, 64));
-    reg.register(2, empty_entry(2, 64));
+    reg.register(1, empty_entry(1));
+    reg.register(2, empty_entry(2));
     assert_eq!(
         reg.set_served_models(1, &["base".into()]),
         ServedModelsVerdict::Accepted
@@ -191,8 +216,8 @@ fn a_worker_that_gained_a_model_widens_the_set_instead_of_being_evicted() {
 #[test]
 fn a_worker_missing_a_model_is_kept_and_canonical_is_not_narrowed() {
     let reg = WorkerRegistry::new();
-    reg.register(1, empty_entry(1, 64));
-    reg.register(2, empty_entry(2, 64));
+    reg.register(1, empty_entry(1));
+    reg.register(2, empty_entry(2));
     reg.set_served_models(1, &["base".into(), "adapter".into()]);
 
     assert_eq!(
@@ -220,8 +245,8 @@ fn a_worker_missing_a_model_is_kept_and_canonical_is_not_narrowed() {
 #[test]
 fn a_conflicting_model_set_is_still_a_mismatch() {
     let reg = WorkerRegistry::new();
-    reg.register(1, empty_entry(1, 64));
-    reg.register(2, empty_entry(2, 64));
+    reg.register(1, empty_entry(1));
+    reg.register(2, empty_entry(2));
     reg.set_served_models(1, &["gemma".into(), "shared".into()]);
 
     let v = reg.set_served_models(2, &["qwen".into(), "shared".into()]);
@@ -239,8 +264,8 @@ fn a_conflicting_model_set_is_still_a_mismatch() {
 #[test]
 fn set_served_models_mismatch_returns_mismatch_and_skips_by_model() {
     let reg = WorkerRegistry::new();
-    reg.register(1, empty_entry(1, 64));
-    reg.register(2, empty_entry(2, 64));
+    reg.register(1, empty_entry(1));
+    reg.register(2, empty_entry(2));
     reg.set_served_models(1, &["gemma".into()]);
     let verdict = reg.set_served_models(2, &["qwen".into()]);
     match verdict {
@@ -265,10 +290,10 @@ fn set_served_models_mismatch_returns_mismatch_and_skips_by_model() {
 #[test]
 fn set_served_models_empty_returns_empty_without_changing_canonical() {
     let reg = WorkerRegistry::new();
-    reg.register(1, empty_entry(1, 64));
+    reg.register(1, empty_entry(1));
     reg.set_served_models(1, &["gemma".into()]);
     // Worker 2 reports empty (engine not ready yet): no change, no eviction.
-    reg.register(2, empty_entry(2, 64));
+    reg.register(2, empty_entry(2));
     assert_eq!(reg.set_served_models(2, &[]), ServedModelsVerdict::Empty);
     let canonical = reg.canonical_models.lock().unwrap().clone();
     let expected: BTreeSet<String> = ["gemma".to_string()].into_iter().collect();
@@ -280,8 +305,8 @@ fn set_served_models_empty_returns_empty_without_changing_canonical() {
 #[test]
 fn reset_declared_models_repins_and_reroutes_existing_workers() {
     let reg = WorkerRegistry::new();
-    reg.register(1, entry(1, 16, "old-model"));
-    reg.register(2, entry(2, 16, "old-model"));
+    reg.register(1, entry(1, "old-model"));
+    reg.register(2, entry(2, "old-model"));
     assert!(matches!(
         reg.set_served_models(1, &["old-model".to_string()]),
         ServedModelsVerdict::Accepted
@@ -304,7 +329,7 @@ fn reset_declared_models_repins_and_reroutes_existing_workers() {
     drop(by_model);
 
     // And the pin moved with it, so a worker joining later is accepted.
-    reg.register(3, entry(3, 16, "new-model"));
+    reg.register(3, entry(3, "new-model"));
     assert!(matches!(
         reg.set_served_models(3, &["new-model".to_string()]),
         ServedModelsVerdict::Accepted
@@ -316,7 +341,7 @@ fn reset_declared_models_repins_and_reroutes_existing_workers() {
 #[test]
 fn reset_declared_models_with_none_only_drops_the_pin() {
     let reg = WorkerRegistry::new();
-    reg.register(1, entry(1, 16, "m"));
+    reg.register(1, entry(1, "m"));
     reg.set_served_models(1, &["m".to_string()]);
     assert!(reg.canonical_models.lock().unwrap().is_some());
 
@@ -331,7 +356,7 @@ fn reset_declared_models_with_none_only_drops_the_pin() {
 #[test]
 fn canonical_models_cleared_when_registry_becomes_empty() {
     let reg = WorkerRegistry::new();
-    reg.register(1, empty_entry(1, 64));
+    reg.register(1, empty_entry(1));
     reg.set_served_models(1, &["gemma".into()]);
     assert!(reg.canonical_models.lock().unwrap().is_some());
     // Unregistering the last worker clears canonical, so a rolling model

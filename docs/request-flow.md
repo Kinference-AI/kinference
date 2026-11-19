@@ -104,9 +104,14 @@ a method whose typed result the next step consumes.
 3. Score the groups. For the first pool that serves the model,
    `service::scoring::score_workers` takes the ready workers and tokenizes
    the prompt through the pool's tokenize mode: in process, through vLLM's
-   `/render`, or both, compared. Then, for each block size in the pool, it
-   hashes the tokens into blocks and matches the blocks against the pool's
-   radix tree, which gives the cached-prefix overlap for each worker. The
+   `/render`, or both, compared. Then, for each block size among the
+   workers, it hashes the tokens into blocks and matches the blocks
+   against the pool's radix tree, which gives the cached-prefix overlap
+   for each worker at the worker's own block size. A worker that has
+   published no KV event yet has no block size. Scoring counts that
+   worker's blocks at the block size that most of its peers have, with no
+   block matched. When no worker of the pool has a block size, scoring
+   counts no blocks. The
    last scrape sample gives each worker's load. If tokenizing fails
    everywhere, scoring falls back to load alone rather than failing the
    pick. The service scores any further pools that serve the model with
@@ -233,7 +238,7 @@ That claim is what makes a model routable.
 - The worker-set watch. Every `InferenceWorkerSet` event wakes it up. It
   re-derives the desired pools from the whole store and hands them to the
   pool manager's `reconcile`, which creates, updates and retires pools.
-  When a set names an unknown profile or an invalid block size, the watch
+  When a set names an unknown profile, the watch
   rejects that set alone, reports the rejection on the set's status, and
   goes on with the rest. Reconciling waits until the initial list
   completes, because a partial store would retire every pool and discard

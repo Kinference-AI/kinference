@@ -1,4 +1,4 @@
-# kvBlockSize must match vLLM's CPU block size, or every event is dropped.
+# Kinference ignores kvBlockSize.
 apiVersion: kinference.buoyant.io/v1alpha1
 kind: InferenceWorkerSet
 metadata:

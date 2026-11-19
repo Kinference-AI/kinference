@@ -21,7 +21,9 @@ pub struct WorkerScore {
     pub queue_running: u32,
     pub queue_swapped: u32,
     pub kv_cache_usage: f32,
-    pub block_size: u32,
+    /// The block size that scoring cut the prompt at for this worker. `None`
+    /// when no worker of the pool has a block size.
+    pub block_size: Option<u32>,
     pub total_blocks: u32,
 }
 
@@ -513,7 +515,7 @@ pub fn pick_endpoint<'a>(inputs: &PickInputs<'a>) -> Option<PickResult<'a>> {
 ///    `cfg.replication_warm_target > 1` (feature enabled).
 /// 2. The picker's chosen worker is committed-warm: its raw
 ///    radix-tree match (`kv_blocks`) covers at least the fraction
-///    of `total_blocks` configured by
+///    of its own `total_blocks` configured by
 ///    `cfg.replication_warm_threshold_fraction`.
 /// 3. Fewer than `cfg.replication_warm_target` workers are
 ///    committed-warm in the current snapshot.
@@ -543,19 +545,23 @@ fn cache_replication_override(
         "kv_blocks_per_worker must be parallel to scores"
     );
     let best = &scores[chosen_idx];
-    let total = best.total_blocks as f32;
-    if total <= 0.0 {
+    if best.total_blocks == 0 {
         return chosen_idx;
     }
     let fraction = picker.replication_warm_threshold_fraction.clamp(0.0, 1.0);
-    let warm_blocks = (total * fraction).round() as u32;
+    // Workers of one pool can have different block sizes, so each worker's
+    // threshold comes from the worker's own block count. A worker that
+    // counts no blocks is never warm.
+    let warm_blocks = |idx: usize| (scores[idx].total_blocks as f32 * fraction).round() as u32;
+    let is_warm =
+        |idx: usize, blocks: u32| scores[idx].total_blocks > 0 && blocks >= warm_blocks(idx);
     let raw_kv = |idx: usize| kv_blocks_per_worker[idx];
-    if raw_kv(chosen_idx) < warm_blocks {
+    if !is_warm(chosen_idx, raw_kv(chosen_idx)) {
         // Best is a cold pick; nothing to replicate.
         return chosen_idx;
     }
     let warm_count = (0..scores.len())
-        .filter(|i| raw_kv(*i) >= warm_blocks)
+        .filter(|i| is_warm(*i, raw_kv(*i)))
         .count();
     if warm_count >= picker.replication_warm_target as usize {
         // Already replicated enough.
@@ -574,7 +580,7 @@ fn cache_replication_override(
     let cheapest_candidate = scores
         .iter()
         .enumerate()
-        .filter(|(i, w)| raw_kv(*i) < warm_blocks && w.matched_blocks < warm_blocks)
+        .filter(|(i, w)| !is_warm(*i, raw_kv(*i)) && !is_warm(*i, w.matched_blocks))
         .map(|(i, _)| (i, predicted_of(i)))
         .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     let Some((cand_idx, cand_ms)) = cheapest_candidate else {
@@ -598,7 +604,7 @@ fn cache_replication_override(
         replication_threshold_pct = picker.replication_threshold_pct,
         warm_count,
         target = picker.replication_warm_target,
-        warm_blocks_threshold = warm_blocks,
+        warm_blocks_threshold = warm_blocks(chosen_idx),
         total_blocks = best.total_blocks,
         warm_threshold_fraction = fraction,
         "redirecting to replicate the prefix cache"

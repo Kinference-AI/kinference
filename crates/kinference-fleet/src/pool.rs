@@ -2,8 +2,8 @@
 //! decision consults and commits into.
 //!
 //! A worker set is declared as an `InferenceWorkerSet` or in the config, both
-//! resolve to a `PoolSpec`, and a `Pool` is built from that: a radix tree at
-//! one block size, the worker registry that populates it, the inflight
+//! resolve to a `PoolSpec`, and a `Pool` is built from that: a radix tree,
+//! the worker registry that populates it, the inflight
 //! bookkeeping that must stay consistent with both, and the lock that
 //! serializes commits into them.
 //!
@@ -12,8 +12,8 @@
 //!
 //! Per pool:
 //! - `predictor` / `picker`: coefficients and routing policy.
-//! - `block_size`: KV hash granularity.
-//! - `indexer`: a `KvIndexer` built with `block_size`.
+//! - `indexer`: a `KvIndexer` that holds each worker's blocks at the
+//!   worker's own block size.
 //! - `registry`: workers, plus homogeneity enforcement (`canonical_models`).
 //! - `inflight_prefixes` / `inflight`: shadow tracking of
 //!   dispatched-but-unobserved work.
@@ -53,7 +53,6 @@ pub struct PoolSpec {
     pub key: PoolKey,
     pub name: String,
     pub profile: String,
-    pub kv_block_size: u32,
     pub predictor: PredictorConfig,
     pub picker: PickerConfig,
     pub tokenize_mode: TokenizeMode,
@@ -173,15 +172,13 @@ pub struct Pool {
     /// The profile this pool's tuning came from, logged on each observation
     /// event.
     pub profile: String,
-    /// KV-cache hash block size for every worker in this pool.
-    pub block_size: u32,
     /// Latency-model coefficients for this pool.
     pub predictor: PredictorConfig,
     /// Routing policy for this pool.
     pub picker: PickerConfig,
     /// This pool's worker set + `by_model` index + homogeneity guard.
     pub registry: Arc<WorkerRegistry>,
-    /// This pool's KV radix-tree index, built with `block_size`.
+    /// This pool's KV radix-tree index.
     pub indexer: Arc<KvIndexer>,
     /// Dispatched-but-not-yet-stored prefix tracker for this pool.
     pub inflight_prefixes: Arc<InflightPrefixes>,
@@ -211,9 +208,14 @@ pub struct Pool {
     pub cancel: CancellationToken,
 }
 
+/// `KvIndexer` reads its block size only in `find_matches_for_request`,
+/// which Kinference never calls. Scoring hashes the prompt at each worker's
+/// own block size instead.
+const INDEXER_BLOCK_SIZE: u32 = 16;
+
 impl Pool {
-    /// Build a `Pool` from its config. Constructs a fresh `KvIndexer` sized to
-    /// this pool's `block_size`, plus empty per-pool registries.
+    /// Build a `Pool` from its config. Constructs a fresh `KvIndexer`, plus
+    /// empty per-pool registries.
     ///
     /// `parent` is the process-wide token; the pool takes a child of it.
     /// `KvIndexer`'s `Drop` cancels the token it was given, so handing it the
@@ -224,7 +226,7 @@ impl Pool {
         let kv_metrics = Arc::new(KvIndexerMetrics::new_unregistered());
         let indexer = Arc::new(KvIndexer::new(
             cancel.clone(),
-            spec.kv_block_size,
+            INDEXER_BLOCK_SIZE,
             kv_metrics,
         ));
         Self {
@@ -233,7 +235,6 @@ impl Pool {
             key: spec.key.clone(),
             name: spec.name.clone(),
             profile: spec.profile.clone(),
-            block_size: spec.kv_block_size,
             predictor: spec.predictor.clone(),
             picker: spec.picker.clone(),
             registry: Arc::new(WorkerRegistry::new()),
@@ -253,20 +254,12 @@ impl Pool {
     /// Keeps the same `PoolId`, `KvIndexer` (and so its warm prefix cache),
     /// worker registry, inflight trackers and token; only the tuning values
     /// change. Readers holding the old snapshot finish against the old values.
-    ///
-    /// `block_size` is baked into the `KvIndexer`, so changing it requires
-    /// retire-and-create instead (debug-asserted).
     pub fn with_spec(&self, spec: &PoolSpec) -> Self {
-        debug_assert_eq!(
-            self.block_size, spec.kv_block_size,
-            "block_size is baked into the KvIndexer; a change needs retire + create"
-        );
         Self {
             id: self.id,
             key: spec.key.clone(),
             name: spec.name.clone(),
             profile: spec.profile.clone(),
-            block_size: self.block_size,
             predictor: spec.predictor.clone(),
             picker: spec.picker.clone(),
             tokenize_mode: spec.tokenize_mode,
@@ -299,7 +292,6 @@ pub struct WorkerContext {
     pub endpoint_key: String,
     pub pool_id: PoolId,
     pub pool_name: String,
-    pub block_size: u32,
     pub registry: Arc<WorkerRegistry>,
     pub indexer: Arc<KvIndexer>,
     pub inflight_prefixes: Arc<InflightPrefixes>,
@@ -373,9 +365,6 @@ pub struct ReconcileReport {
     pub resurrected: Vec<PoolKey>,
     /// Tuning changed; same pool, same cache, new coefficients.
     pub updated: Vec<PoolKey>,
-    /// `kv_block_size` changed, which needs retire and create, losing the
-    /// cache.
-    pub replaced: Vec<PoolKey>,
     pub retired: Vec<PoolKey>,
     /// `on_create` failed; nothing was published.
     pub failed: Vec<PoolKey>,
@@ -451,8 +440,6 @@ impl PoolManager {
         let wanted: BTreeMap<PoolKey, PoolSpec> =
             desired.into_iter().map(|s| (s.key.clone(), s)).collect();
 
-        // Retire first, so a replace frees its workers' fleet-wide state before
-        // the replacement claims the same ids.
         let going: Vec<PoolKey> = self
             .live
             .keys()
@@ -467,22 +454,6 @@ impl PoolManager {
         for (key, spec) in wanted {
             match self.live.get(&key) {
                 Some((_, live_spec)) if *live_spec == spec => {}
-                Some((pool, _)) if pool.block_size != spec.kv_block_size => {
-                    // The indexer can't change block size, so this discards
-                    // the set's prefix cache.
-                    tracing::info!(
-                        workerset = %key,
-                        from = pool.block_size,
-                        to = spec.kv_block_size,
-                        "kvBlockSize changed; replacing the worker set and its prefix cache"
-                    );
-                    self.retire(&key);
-                    match self.create(spec) {
-                        CreateOutcome::Failed => report.failed.push(key),
-                        // May resurrect a matching retired entry.
-                        _ => report.replaced.push(key),
-                    }
-                }
                 Some((pool, live_spec)) => {
                     // A declared model list is per-worker state in the shared
                     // registry, so push a change into the existing workers.
@@ -599,7 +570,6 @@ impl PoolManager {
         tracing::info!(
             workerset = %spec.key,
             profile = %spec.profile,
-            block_size = spec.kv_block_size,
             resurrected,
             "worker set created"
         );
@@ -656,28 +626,20 @@ impl PoolManager {
 /// One `Pool` for tests, from a minimal static spec.
 #[cfg(any(test, feature = "test-util"))]
 pub fn test_pool(name: &str) -> Arc<Pool> {
-    test_pool_with_block_size(name, 16)
-}
-
-/// A test pool with a given block size, which sets `total_blocks` and so the
-/// prefill term, making pools predict differently for one prompt.
-#[cfg(any(test, feature = "test-util"))]
-pub fn test_pool_with_block_size(name: &str, block_size: u32) -> Arc<Pool> {
     Arc::new(Pool::from_spec(
         PoolId::next(),
-        &test_spec(name, block_size),
+        &test_spec(name),
         &CancellationToken::new(),
     ))
 }
 
 /// A minimal spec shared by tests that need a `Pool`.
 #[cfg(any(test, feature = "test-util"))]
-pub fn test_spec(name: &str, kv_block_size: u32) -> PoolSpec {
+pub fn test_spec(name: &str) -> PoolSpec {
     PoolSpec {
         key: PoolKey::local(name),
         name: name.to_string(),
         profile: "test-profile".to_string(),
-        kv_block_size,
         predictor: PredictorConfig::default(),
         picker: PickerConfig::default(),
         tokenize_mode: TokenizeMode::default(),
