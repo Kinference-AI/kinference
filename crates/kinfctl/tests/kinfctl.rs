@@ -34,7 +34,6 @@ metadata:
   namespace: default
 spec:
   profile: default
-  kvBlockSize: 64
   serviceRef:
     name: gemma-4-12b-vllm
     port: http
@@ -51,7 +50,6 @@ metadata:
   namespace: default
 spec:
   profile: default
-  kvBlockSize: 16
   serviceRef:
     name: qwen-vllm
     port: http
@@ -69,7 +67,6 @@ metadata:
   namespace: default
 spec:
   profile: default
-  kvBlockSize: 16
   serviceRef:
     name: qwen-3-6-35b-a3b-vllm
     port: http

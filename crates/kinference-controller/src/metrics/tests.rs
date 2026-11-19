@@ -40,8 +40,6 @@ fn rejection_reason_labels_match_the_enum() {
     let all = [
         R::MissingProfile,
         R::UnknownProfile { defined: vec![] },
-        R::MissingKvBlockSize,
-        R::InvalidKvBlockSize { got: 0 },
         R::MissingServiceRef,
         R::ModelMissingName,
         R::KvEventsMissingPort,

@@ -11,8 +11,8 @@
 //!
 //! There are two kinds of destination:
 //!
-//! - An `InferenceWorkerSet` is a pool. It carries its own `serviceRef`, ports,
-//!   `kvBlockSize` and `profile`, and resolves by `(namespace, name)` against
+//! - An `InferenceWorkerSet` is a pool. It carries its own `serviceRef`, ports
+//!   and `profile`, and resolves by `(namespace, name)` against
 //!   the live pool set.
 //! - An `InferenceProvider` lives outside the cluster. It resolves to a
 //!   `GatewayBackend` reference, a wire format and a declared model table, and

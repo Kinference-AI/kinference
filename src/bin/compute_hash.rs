@@ -1,7 +1,7 @@
 use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 
 /// Helper for the smoke test: given a comma-separated list of u32 tokens and a
-/// kv_block_size, print the `LocalBlockHash` values that the indexer would
+/// block size, print the `LocalBlockHash` values that the indexer would
 /// compute and store as `tokens_hash` for those tokens.
 fn main() {
     let mut args = std::env::args().skip(1);

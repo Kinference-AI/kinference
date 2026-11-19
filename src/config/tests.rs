@@ -8,11 +8,10 @@ fn parse(v: Value) -> serde_json::Result<Config> {
     serde_json::from_value(v)
 }
 
-fn workerset(name: &str, profile: &str, kv_block_size: u32, service: &str) -> Value {
+fn workerset(name: &str, profile: &str, service: &str) -> Value {
     json!({
         "name": name,
         "profile": profile,
-        "kv_block_size": kv_block_size,
         "discovery": {"service_name": service},
     })
 }
@@ -27,10 +26,10 @@ fn config_without_worker_sets_fails_validate() {
     assert!(err.to_string().contains("at least one"));
 }
 
-/// A worker set resolves to the same pool spec with any `kv_block_size`
-/// and with none.
+/// The config ignores a `kv_block_size` that the operator leaves in a
+/// worker set.
 #[test]
-fn the_block_size_of_a_workerset_is_optional_and_not_read() {
+fn a_leftover_block_size_of_a_workerset_is_ignored() {
     let specs = |workerset: Value| {
         let cfg = parse(json!({
             "listen": "127.0.0.1:50051",
@@ -41,12 +40,12 @@ fn the_block_size_of_a_workerset_is_optional_and_not_read() {
         cfg.validate().expect("validates");
         cfg.pool_specs().expect("resolves")
     };
-    let absent = specs(json!({
-        "name": "p", "profile": "t", "discovery": {"service_name": "svc"},
+    let leftover = specs(json!({
+        "name": "p", "profile": "t", "kv_block_size": 64,
+        "discovery": {"service_name": "svc"},
     }));
-    assert_eq!(absent.len(), 1);
-    assert_eq!(specs(workerset("p", "t", 0, "svc")), absent);
-    assert_eq!(specs(workerset("p", "t", 64, "svc")), absent);
+    assert_eq!(leftover.len(), 1);
+    assert_eq!(leftover, specs(workerset("p", "t", "svc")));
 }
 
 #[test]
@@ -54,7 +53,7 @@ fn duplicate_workerset_names_fail_validate() {
     let cfg = parse(json!({
         "listen": "127.0.0.1:50051",
         "profile": [{"name": "t"}],
-        "workerset": [workerset("dup", "t", 16, "a"), workerset("dup", "t", 16, "b")],
+        "workerset": [workerset("dup", "t", "a"), workerset("dup", "t", "b")],
     }))
     .expect("parses");
     let err = cfg
@@ -68,7 +67,7 @@ fn workerset_without_service_name_fails_validate() {
     let cfg = parse(json!({
         "listen": "127.0.0.1:50051",
         "profile": [{"name": "t"}],
-        "workerset": [{"name": "p", "profile": "t", "kv_block_size": 16}],
+        "workerset": [{"name": "p", "profile": "t"}],
     }))
     .expect("parses");
     let err = cfg
@@ -82,7 +81,7 @@ fn cfg_with_leader_election(section: Value) -> Config {
     parse(json!({
         "listen": "127.0.0.1:50051",
         "profile": [{"name": "t"}],
-        "workerset": [workerset("p", "t", 16, "svc")],
+        "workerset": [workerset("p", "t", "svc")],
         "leader_election": section,
     }))
     .expect("parses")
@@ -148,7 +147,7 @@ fn a_profile_that_omits_everything_gets_the_struct_defaults() {
     let cfg = parse(json!({
         "listen": "127.0.0.1:50051",
         "profile": [{"name": "t"}],
-        "workerset": [workerset("p", "t", 64, "svc")],
+        "workerset": [workerset("p", "t", "svc")],
     }))
     .expect("parses");
     cfg.validate().expect("validates");
@@ -167,7 +166,7 @@ fn an_undefined_profile_is_rejected_and_names_both_sides() {
     let cfg = parse(json!({
         "listen": "127.0.0.1:50051",
         "profile": [{"name": "h100"}, {"name": "a100"}],
-        "workerset": [workerset("ws", "typo-h100", 16, "svc")],
+        "workerset": [workerset("ws", "typo-h100", "svc")],
     }))
     .expect("parses");
     let err = cfg.validate().expect_err("unknown profile must fail");
@@ -195,8 +194,8 @@ fn two_worker_sets_sharing_a_profile_get_identical_tuning() {
             "tokenize": {"mode": "local"},
         }],
         "workerset": [
-            workerset("a", "shared", 16, "svc-a"),
-            workerset("b", "shared", 64, "svc-b"),
+            workerset("a", "shared", "svc-a"),
+            workerset("b", "shared", "svc-b"),
         ],
     }))
     .expect("parses");
@@ -216,7 +215,7 @@ fn duplicate_profile_names_fail_validate() {
     let cfg = parse(json!({
         "listen": "127.0.0.1:50051",
         "profile": [{"name": "dup"}, {"name": "dup"}],
-        "workerset": [workerset("ws", "dup", 16, "svc")],
+        "workerset": [workerset("ws", "dup", "svc")],
     }))
     .expect("parses");
     let err = cfg
@@ -230,7 +229,7 @@ fn duplicate_profile_names_fail_validate() {
 fn a_workerset_without_a_profile_does_not_parse() {
     let err = parse(json!({
         "listen": "127.0.0.1:50051",
-        "workerset": [{"name": "ws", "kv_block_size": 16, "discovery": {"service_name": "svc"}}],
+        "workerset": [{"name": "ws", "discovery": {"service_name": "svc"}}],
     }))
     .expect_err("missing profile must not parse");
     assert!(err.to_string().contains("profile"), "got: {err}");
@@ -370,7 +369,7 @@ fn minimal() -> Config {
     parse(json!({
         "listen": "127.0.0.1:50051",
         "profile": [{"name": "t"}],
-        "workerset": [workerset("p", "t", 16, "svc")],
+        "workerset": [workerset("p", "t", "svc")],
     }))
     .expect("parses")
 }

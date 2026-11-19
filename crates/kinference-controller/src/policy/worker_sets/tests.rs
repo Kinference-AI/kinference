@@ -28,7 +28,6 @@ fn full_spec() -> InferenceWorkerSetSpec {
             port: None,
         },
         profile: Some("h100".into()),
-        kv_block_size: Some(16),
         metrics_port: None,
         kv_events: None,
         model_discovery: None,
@@ -127,30 +126,16 @@ fn a_set_missing_required_fields_is_rejected_without_taking_the_others_down() {
     assert_eq!(reasons, ["MissingProfile", "MissingServiceRef"]);
 }
 
-/// A worker set resolves to the same pool spec whatever its `kvBlockSize`
-/// says, so a change of the field leaves the worker set's pool in place.
+/// A stored worker set that still has `kvBlockSize` must parse, since
+/// `watcher` deserializes list pages wholesale.
 #[test]
-fn the_block_size_field_is_not_read() {
-    let mut absent = full_spec();
-    absent.kv_block_size = None;
-    let mut zero = full_spec();
-    zero.kv_block_size = Some(0);
-    let mut other = full_spec();
-    other.kv_block_size = Some(64);
-
-    let resolve = |spec| {
-        let (mut out, rejected) = desired_pools(
-            &[iws("infra", "ws", spec)],
-            &[profile("h100")],
-            &DiscoveryDefaults::default(),
-        );
-        assert!(rejected.is_empty(), "{rejected:?}");
-        out.remove(&PoolKey::namespaced("infra", "ws")).unwrap()
-    };
-    let with_16 = resolve(full_spec());
-    assert_eq!(resolve(absent), with_16);
-    assert_eq!(resolve(zero), with_16);
-    assert_eq!(resolve(other), with_16);
+fn a_leftover_block_size_field_parses() {
+    serde_json::from_value::<InferenceWorkerSetSpec>(serde_json::json!({
+        "serviceRef": {"name": "vllm", "port": "http"},
+        "profile": "h100",
+        "kvBlockSize": 64,
+    }))
+    .expect("must parse: failing here fails every set in the list page");
 }
 
 /// A model row without a `name` must still parse, since `watcher`
@@ -160,7 +145,6 @@ fn a_models_row_missing_its_name_parses_rather_than_failing_the_page() {
     let spec: InferenceWorkerSetSpec = serde_json::from_value(serde_json::json!({
         "serviceRef": {"name": "vllm", "port": "http"},
         "profile": "h100",
-        "kvBlockSize": 16,
         // What the API server leaves after pruning an undeclared field.
         "models": [{"aliases": ["qwen-2.5"]}]
     }))
@@ -211,7 +195,6 @@ fn an_empty_kv_events_block_parses_rather_than_failing_the_page() {
     let spec: InferenceWorkerSetSpec = serde_json::from_value(serde_json::json!({
         "serviceRef": {"name": "vllm", "port": "http"},
         "profile": "h100",
-        "kvBlockSize": 16,
         "kvEvents": {}
     }))
     .expect("must parse: failing here fails every set in the list page");

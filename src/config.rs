@@ -118,11 +118,6 @@ pub struct WorkerSetConfig {
     pub name: String,
     /// The profile supplying this set's tuning. Required.
     pub profile: String,
-    /// Not read. Kinference learns each worker's block size from the
-    /// worker's KV events.
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub kv_block_size: Option<u32>,
     /// Dedicated `/render` URL (full URL including path). When unset, renders
     /// rotate across the set's own workers.
     #[serde(default)]

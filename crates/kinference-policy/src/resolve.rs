@@ -6,8 +6,8 @@
 //!
 //! An `InferenceWorkerSet` becomes a pool, so a destination naming one is a
 //! `(namespace, name)` lookup against the live pool set (see [`PoolIndex`]).
-//! A set that was rejected reports why (`UnknownProfile`,
-//! `InvalidKvBlockSize`); any other miss is `NoMatchingPool`, normally the
+//! A set that was rejected reports why (`UnknownProfile`, `Incomplete`);
+//! any other miss is `NoMatchingPool`, normally the
 //! brief window before the reconcile runs.
 
 use std::collections::{BTreeMap, HashMap};
@@ -39,8 +39,6 @@ pub enum UnresolvedReason {
     /// It names a routing profile the router does not define, which is fixed in
     /// the router's config rather than the CR.
     UnknownProfile,
-    /// Its `kvBlockSize` is missing or not a usable block size.
-    InvalidKvBlockSize,
     /// `kind` was absent, or something other than `InferenceWorkerSet` or
     /// `InferenceProvider`.
     UnsupportedKind,
@@ -69,7 +67,6 @@ impl UnresolvedReason {
             UnresolvedReason::NotFound => "NotFound",
             UnresolvedReason::NoMatchingPool => "NoMatchingPool",
             UnresolvedReason::UnknownProfile => "UnknownProfile",
-            UnresolvedReason::InvalidKvBlockSize => "InvalidKvBlockSize",
             UnresolvedReason::UnsupportedKind => "UnsupportedKind",
             UnresolvedReason::AmbiguousName => "AmbiguousName",
             UnresolvedReason::CrossNamespaceNotGranted => "CrossNamespaceNotGranted",
@@ -493,9 +490,6 @@ pub fn rejection_index(rejections: &[super::rejection::Rejection]) -> RejectionI
             let reason = match r.reason {
                 RejectReason::MissingProfile | RejectReason::UnknownProfile { .. } => {
                     UnresolvedReason::UnknownProfile
-                }
-                RejectReason::MissingKvBlockSize | RejectReason::InvalidKvBlockSize { .. } => {
-                    UnresolvedReason::InvalidKvBlockSize
                 }
                 // From the pool's side, a set with no Service has no pool.
                 RejectReason::MissingServiceRef => UnresolvedReason::NoMatchingPool,

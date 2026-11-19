@@ -123,7 +123,7 @@ fn no_condition_message_has_a_double_space() {
     );
     collect(
         &rejected_worker_set_status(
-            &kinference_policy::rejection::RejectReason::MissingKvBlockSize,
+            &kinference_policy::rejection::RejectReason::MissingProfile,
             &[],
             None,
         )
@@ -188,11 +188,11 @@ fn state_tokens_compose_across_the_kinds() {
 
     // A rejection stands alone, without `NotReady`.
     let broken = rejected_worker_set_status(
-        &kinference_policy::rejection::RejectReason::MissingKvBlockSize,
+        &kinference_policy::rejection::RejectReason::MissingProfile,
         &[],
         None,
     );
-    assert_eq!(broken.state.as_deref(), Some("MissingKvBlockSize"));
+    assert_eq!(broken.state.as_deref(), Some("MissingProfile"));
 
     // Pool: a destination dangles and the policyRef names the wrong kind.
     // Both are qualifiers since it still serves.
@@ -370,7 +370,7 @@ fn an_unbound_worker_set_reports_the_reason_it_did_not_bind() {
 /// A rejected set keeps `referencedBy`.
 #[test]
 fn a_rejected_worker_set_still_reports_who_named_it() {
-    let reason = kinference_policy::rejection::RejectReason::MissingKvBlockSize;
+    let reason = kinference_policy::rejection::RejectReason::MissingProfile;
     let s = rejected_worker_set_status(&reason, &["chat".to_string()], None);
     assert_eq!(s.referenced_by, vec!["chat".to_string()]);
     assert_eq!(cond(&s, "Accepted").status, "False");
@@ -418,7 +418,7 @@ fn a_rejected_worker_set_reports_why_and_clears_its_counts() {
 /// A persistent rejection keeps its `lastTransitionTime`.
 #[test]
 fn a_persistent_rejection_does_not_rewrite_its_transition_time() {
-    let reason = kinference_policy::rejection::RejectReason::MissingKvBlockSize;
+    let reason = kinference_policy::rejection::RejectReason::MissingProfile;
     let first = rejected_worker_set_status(&reason, &[], None);
     let second = rejected_worker_set_status(&reason, &[], Some(&first));
     assert_eq!(
@@ -688,7 +688,6 @@ fn recorded_cluster() -> (Recorded, Arc<kinference_policy::resolve::PolicyIndex>
                 port: None,
             },
             profile: Some("h100".into()),
-            kv_block_size: Some(16),
             ..Default::default()
         },
         status: None,

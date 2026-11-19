@@ -22,7 +22,6 @@ fn worker_set(name: &str) -> InferenceWorkerSet {
                 port: None,
             },
             profile: Some("h100".into()),
-            kv_block_size: Some(16),
             ..Default::default()
         },
         status: None,
