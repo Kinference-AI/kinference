@@ -420,8 +420,8 @@ fn seeds_for_pool(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
 
 /// The pool's destinations as declared, with what an author needs to write a
 /// policy against them: the name a policy uses, the class, the labels a
-/// selector matches, the models declared, and, for a local set, the KV block
-/// size `matchedBlocks` is counted in.
+/// selector matches, the models declared, and, for a local set, the KV cache
+/// groups that ingest indexes for its workers.
 fn destinations_json(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
     let map = st.pools.snapshot();
     let mut out: Vec<Value> = pool
@@ -445,7 +445,7 @@ fn destinations_json(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
                     "name": w.name,
                     "type": "Local",
                     "labels": w.labels,
-                    "blockSize": map.get(w.pool_id).map(|p| p.block_size),
+                    "indexedGroups": map.get(w.pool_id).map(|p| indexed_groups_json(p)),
                     "declaredModels": models,
                 })
             }
@@ -466,7 +466,7 @@ fn destinations_json(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
                     "name": p.name,
                     "type": "Provider",
                     "labels": p.labels,
-                    "blockSize": Value::Null,
+                    "indexedGroups": Value::Null,
                     "declaredModels": models,
                 })
             }
@@ -474,6 +474,49 @@ fn destinations_json(st: &PolicyApiState, pool: &ResolvedPool) -> Vec<Value> {
         .collect();
     out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     out
+}
+
+/// The distinct kinds and block sizes among the indexed groups of a pool's
+/// workers, each with its worker count, by block size and then kind. A
+/// worker without an indexed group is in no entry.
+pub(super) fn indexed_groups_json(pool: &kinference_fleet::pool::Pool) -> Value {
+    let mut groups: BTreeMap<_, usize> = BTreeMap::new();
+    for (_, entry) in pool.registry.iter_snapshot() {
+        if let Some(g) = entry.indexed_group {
+            *groups.entry((g.block_size, g.kind)).or_default() += 1;
+        }
+    }
+    groups
+        .into_iter()
+        .map(|((block_size, kind), workers)| {
+            json!({
+                "kind": kind.map(|k| k.as_str()),
+                "blockSize": block_size,
+                "workers": workers,
+            })
+        })
+        .collect()
+}
+
+/// The block size that `predict` counts a candidate's blocks in. A
+/// candidate whose `endpoint` names a worker of the pool gets that worker's
+/// block size. Any other candidate gets the block size that most workers of
+/// the pool have, the smaller one on a tie. `None` when ingest has learned
+/// no block size for the pool.
+pub(super) fn candidate_block_size(
+    pool: &kinference_fleet::pool::Pool,
+    endpoint: Option<&str>,
+) -> Option<u32> {
+    let workers = pool.registry.iter_snapshot();
+    let named = endpoint.and_then(|ep| {
+        workers
+            .iter()
+            .find(|(_, e)| e.http_url.as_deref() == Some(ep) || e.score_addr == ep)
+            .and_then(|(_, e)| e.block_size())
+    });
+    named.or_else(|| {
+        kinference_fleet::workers::most_common_block_size(workers.iter().map(|(_, e)| e))
+    })
 }
 
 /// The policy a pool names, as `{name, resolved}`, or `null` when it names
@@ -602,9 +645,11 @@ pub(super) struct CandidateOverride {
     /// Provider-only: the provider's observed TTFT p95, in milliseconds.
     #[serde(default, rename = "observedTtftP95Ms")]
     observed_ttft_p95_ms: Option<f64>,
-    /// Cached prefix blocks, in the candidate's worker set's `blockSize`
-    /// (`pools[].destinations[].blockSize` in `context`). Absent means a cold
-    /// prompt.
+    /// Cached prefix blocks, at the block size of the worker that `endpoint`
+    /// names. For any other endpoint, the block size is the one that most
+    /// workers of the worker set have
+    /// (`pools[].destinations[].indexedGroups` in `context`). Absent means a
+    /// cold prompt.
     #[serde(default)]
     matched_blocks: Option<u32>,
     /// Override for `prefixCacheHitRatio`, 0.0..1.0. Derived from
@@ -950,7 +995,7 @@ fn predict(
         );
     }
     // This candidate's worker set's predictor and live pool, or why there is
-    // none. Coefficients and block size differ per set. A synthesized worker
+    // none. Coefficients differ per set. A synthesized worker
     // belongs to no set, so it borrows one, reported as `Borrowed`.
     let map = st.pools.snapshot();
     let found: Result<(Option<String>, Arc<kinference_fleet::pool::Pool>), &'static str> =
@@ -977,10 +1022,18 @@ fn predict(
             }
         };
 
+    let block_size = found
+        .as_ref()
+        .ok()
+        .and_then(|(_, live)| candidate_block_size(live, o.endpoint.as_deref()));
     // Ceiling division: a partial block still has to be prefilled. `validate`
-    // bounds the token count, so this can't overflow.
-    let blocks = found.as_ref().ok().map(|(_, live)| {
-        let bs = live.block_size.max(1) as i64;
+    // bounds the token count, so this can't overflow. A worker set without a
+    // learned block size counts no blocks, as scoring does.
+    let blocks = found.as_ref().ok().map(|_| {
+        let Some(bs) = block_size else {
+            return (0, 0);
+        };
+        let bs = bs as i64;
         let tokens = input_tokens.unwrap_or(0).max(0);
         let total = ((tokens + bs - 1) / bs) as u32;
         (total, o.matched_blocks.unwrap_or(0).min(total))
@@ -999,7 +1052,6 @@ fn predict(
         Ok(f) => f,
         Err(why) => return Prediction::bare(PredictionSource::Unavailable, Some(why)),
     };
-    let block_size = live.block_size.max(1);
     let (total_blocks, matched) = blocks.expect("a live pool yields a block count");
 
     let score = WorkerScore {
@@ -1012,7 +1064,7 @@ fn predict(
         queue_running: 0,
         queue_swapped: 0,
         kv_cache_usage: 0.0,
-        block_size: Some(block_size),
+        block_size,
         total_blocks,
     };
     // No inflight summaries for a hypothetical request.
