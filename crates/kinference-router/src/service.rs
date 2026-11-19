@@ -329,7 +329,7 @@ pub(crate) struct ScoreSideData {
 }
 
 pub struct KinferenceService {
-    pub(crate) scoring: Scoring,
+    pub(crate) scoring: Arc<Scoring>,
     /// The tokenizer. The mode and render URL are per pool, on the request.
     pub(crate) tokenizer: Arc<dyn tokenizer::Tokenizer>,
     /// Buffered request bodies for the `PushBody` → `Pick` → `PullBody` flow.
@@ -379,7 +379,7 @@ impl KinferenceService {
         prom: Arc<RouterMetrics>,
     ) -> Self {
         Self {
-            scoring,
+            scoring: Arc::new(scoring),
             tokenizer,
             bodies,
             observations,

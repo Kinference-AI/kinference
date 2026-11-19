@@ -5,7 +5,7 @@
 //! worker sets and providers; `candidates_for` flattens a scored group into
 //! per-endpoint candidates. Ranking holds no pool lock; see `policy_select`.
 
-use futures::{FutureExt as _, StreamExt as _};
+use tracing::Instrument as _;
 
 use super::*;
 
@@ -408,20 +408,20 @@ impl KinferenceService {
         }
     }
 
-    /// Start one render for each upstream model that `targets` reach on a
-    /// local destination and that no group in `scored` has.
+    /// Start one render task for each upstream model that `targets` reach on
+    /// a local destination and that no group in `scored` has.
     ///
     /// Token ids belong to a model, so each such model costs one render call.
     /// Each model renders on the first destination with a ready worker for
     /// it. The candidate loop scores any other pool that serves the same
     /// model from those tokens, or on load alone when the render failed.
-    fn start_renders<'a>(
-        &'a self,
+    fn start_renders(
+        &self,
         targets: &[&kinference_policy::engine::ScoreTarget],
         destinations: &[kinference_policy::resolve::ResolvedDestination],
         scored: &[ScoredGroup],
         spare: &ScoreInput,
-    ) -> Renders<'a> {
+    ) -> Renders {
         let pools = self.scoring.pools.snapshot();
         let mut renders = Renders::default();
         for (pool_id, upstream) in local_upstreams(targets.iter().copied(), destinations) {
@@ -439,19 +439,21 @@ impl KinferenceService {
             if !ready {
                 continue;
             }
+            let scoring = self.scoring.clone();
+            let tokenizer = self.tokenizer.clone();
             let input = spare.clone();
             let model = upstream.clone();
+            let task = async move {
+                let (outcome, side) = scoring
+                    .score_workers(&*tokenizer, &pool, &model, input, HashMap::new())
+                    .await;
+                (pool, model, outcome, side)
+            };
+            // The task keeps the pick's span, so its log lines name the pick.
+            renders
+                .tasks
+                .spawn(task.instrument(tracing::Span::current()));
             renders.pending.insert(upstream);
-            renders.inflight.push(
-                async move {
-                    let (outcome, side) = self
-                        .scoring
-                        .score_workers(&*self.tokenizer, &pool, &model, input, HashMap::new())
-                        .await;
-                    (pool, model, outcome, side)
-                }
-                .boxed(),
-            );
         }
         renders
     }
@@ -575,27 +577,30 @@ impl KinferenceService {
 /// One finished render: the pool and model that it scored, and the outcome.
 type Rendered = (Arc<Pool>, String, ScoreOutcome, ScoreSideData);
 
-/// The render calls that a pick has started, one per model.
+/// The render tasks that a pick has started, one per model.
 ///
-/// The futures run only while the pick polls them, through [`Renders::next`],
-/// so the first poll sends every request. Dropping the set cancels the calls
-/// that the pick did not wait for.
+/// Each task runs on the runtime, so a render advances whether or not the
+/// pick is waiting for it. Dropping the set aborts the tasks that the pick
+/// did not wait for.
 #[derive(Default)]
-struct Renders<'a> {
-    inflight: futures::stream::FuturesUnordered<futures::future::BoxFuture<'a, Rendered>>,
-    /// The models whose render has not finished.
+struct Renders {
+    tasks: tokio::task::JoinSet<Rendered>,
+    /// The models that have no render result yet.
     pending: std::collections::HashSet<String>,
 }
 
-impl Renders<'_> {
+impl Renders {
     /// Add the next render to finish to `scored`. False when none is left.
     async fn next(&mut self, scored: &mut Vec<ScoredGroup>, prom: &RouterMetrics) -> bool {
-        let Some((pool, model, outcome, side)) = self.inflight.next().await else {
-            return false;
-        };
-        self.pending.remove(&model);
-        scored.extend(ScoredGroup::from_outcome(pool, model, outcome, side, prom));
-        true
+        match self.tasks.join_next().await {
+            None => false,
+            Some(Ok((pool, model, outcome, side))) => {
+                self.pending.remove(&model);
+                scored.extend(ScoredGroup::from_outcome(pool, model, outcome, side, prom));
+                true
+            }
+            Some(Err(e)) => std::panic::resume_unwind(e.into_panic()),
+        }
     }
 
     /// Wait until no model in `needed` is still rendering.

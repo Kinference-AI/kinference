@@ -124,10 +124,11 @@ a method whose typed result the next step consumes.
    without falling through. The policy then waits only for the renders
    that it needs. When a rule tests `inputTokens`, the count comes from
    the first render to finish. Each rule waits for its own models when the
-   policy reaches that rule. Renders that the pick never needed are
-   cancelled. The policy flattens the candidates per endpoint, fits each
-   local candidate against its endpoint's context window using that
-   model's own token count, applies the exclusions, and ranks the rest. A
+   policy reaches that rule. Each render runs as its own task. Renders
+   that the pick never needed are cancelled. The policy flattens the
+   candidates per endpoint, fits each local candidate against its
+   endpoint's context window using that model's own token count, applies
+   the exclusions, and ranks the rest. A
    candidate whose render failed is taken to fit, and the fit never
    applies to a provider. Ranking holds no pool lock, because
    candidates may span pools, so the ranking's input may miss one
