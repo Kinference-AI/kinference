@@ -242,6 +242,16 @@ pub fn matching_rules<'a>(
     policy.rules.iter().filter(|r| r.matches(attrs)).collect()
 }
 
+/// Rules that could match this request once its token count is known, in
+/// list order: [`matching_rules`] with every `inputTokens` term taken as
+/// true.
+pub fn possibly_matching_rules<'a>(
+    policy: &'a CompiledPolicy,
+    attrs: &RequestAttrs,
+) -> Vec<&'a CompiledRule> {
+    policy.rules.iter().filter(|r| r.may_match(attrs)).collect()
+}
+
 /// Resolve a route's `consider` into the set of `(model, backends)` pairs to
 /// score.
 ///
@@ -341,9 +351,13 @@ pub fn evaluate(
     //
     // Uses each endpoint's effective window, so a rollout that shrinks
     // --max-model-len stops attracting long requests instead of failing them.
-    let need = required_context(attrs);
+    // A provider's declared window is not checked.
     let mut survivors: Vec<Candidate> = Vec::with_capacity(candidates.len());
     for c in candidates {
+        let need = match c.target {
+            CandidateTarget::Local { .. } => required_context(&c.attrs, attrs),
+            CandidateTarget::Provider { .. } => None,
+        };
         match (need, c.attrs.context_window) {
             (Some(need), Some(window)) if need > window => {
                 trace
@@ -356,15 +370,16 @@ pub fn evaluate(
 
     // --- author exclusions (order-independent set subtraction) -----------
     for ex in &route.exclude {
-        // A guard that doesn't match skips the whole exclusion.
-        if let Some(guard) = &ex.if_
-            && !guard.matches(attrs)
-        {
-            continue;
-        }
+        // A guard reads each candidate's own `inputTokens`, so it is
+        // evaluated per candidate. A candidate with no count, such as a
+        // provider, misses an `inputTokens` term.
         let before = std::mem::take(&mut survivors);
         for c in before {
-            if ex.drop.matches(&c.attrs) {
+            let guarded = ex
+                .if_
+                .as_ref()
+                .is_none_or(|g| g.matches_with_input_tokens(attrs, c.attrs.input_tokens));
+            if guarded && ex.drop.matches(&c.attrs) {
                 trace
                     .eliminated
                     .push((c.label(), format!("exclusion `{}`", ex.name)));
@@ -427,16 +442,18 @@ pub fn evaluate(
     Outcome::Empty { trace }
 }
 
-/// Total context a request needs: prompt plus whatever it may generate.
+/// Total context a request needs on one candidate: the prompt under that
+/// candidate's tokenizer, plus whatever the request may generate.
 ///
 /// `maxTokens` is included because the KV cache has to hold the completion
-/// too.
-fn required_context(attrs: &RequestAttrs) -> Option<i64> {
-    match (attrs.input_tokens, attrs.max_tokens) {
-        (None, _) => None,
-        (Some(input), None) => Some(input),
-        (Some(input), Some(max)) => Some(input.saturating_add(max)),
-    }
+/// too. `None`, so the prompt is taken to fit, when the candidate has no
+/// count of its own.
+fn required_context(candidate: &CandidateAttrs, attrs: &RequestAttrs) -> Option<i64> {
+    let input = candidate.input_tokens?;
+    Some(match attrs.max_tokens {
+        None => input,
+        Some(max) => input.saturating_add(max),
+    })
 }
 
 /// Rank within one tier and return `(winner, how_many_tied)`.

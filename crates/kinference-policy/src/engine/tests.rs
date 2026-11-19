@@ -91,6 +91,53 @@ fn non_matching_rules_are_skipped() {
     assert!(matching_rules(&p, &req()).is_empty());
 }
 
+#[test]
+fn possibly_matching_rules_take_input_tokens_terms_as_true() {
+    let p = policy(json!({"rules": [
+        {"name": "long", "matches": [{"inputTokens": {"greaterThan": 32000}}],
+         "route": {"select": [{"minimize": "PredictedTTFT"}]}},
+        {"name": "long-batch",
+         "matches": [{"inputTokens": {"greaterThan": 32000}, "qos": ["batch"]}],
+         "route": {"select": [{"minimize": "PredictedTTFT"}]}},
+        {"name": "rest", "route": {"select": [{"minimize": "PredictedTTFT"}]}}
+    ]}));
+    let names = |rules: Vec<&CompiledRule>| -> Vec<String> {
+        rules.iter().map(|r| r.name.clone()).collect()
+    };
+    // No count, interactive: `long-batch` fails on `qos` whatever the count.
+    let attrs = RequestAttrs {
+        qos: Some("interactive".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        names(possibly_matching_rules(&p, &attrs)),
+        vec!["long", "rest"]
+    );
+    assert_eq!(names(matching_rules(&p, &attrs)), vec!["rest"]);
+}
+
+#[test]
+fn uses_input_tokens_sees_matches_but_not_guards() {
+    let route = json!({"select": [{"minimize": "PredictedTTFT"}]});
+    let in_matches = policy(json!({"rules": [{"name": "r",
+        "matches": [{"inputTokens": {"greaterThan": 10}}], "route": route}]}));
+    assert!(in_matches.uses_input_tokens());
+
+    let in_guard = policy(json!({"rules": [{"name": "r", "route": {
+        "exclude": [{"name": "x", "if": {"inputTokens": {"greaterThan": 10}},
+                     "drop": {"backend": {"name": "a100"}}}],
+        "select": [{"minimize": "PredictedTTFT"}]}}]}));
+    assert!(
+        !in_guard.uses_input_tokens(),
+        "a guard reads each candidate's own count"
+    );
+
+    let neither = policy(json!({"rules": [{"name": "r",
+        "matches": [{"qos": ["batch"]}], "route": route}]}));
+    assert!(!neither.uses_input_tokens());
+    assert!(!CompiledPolicy::serve_as_asked("p").uses_input_tokens());
+}
+
 // --- consider ---------------------------------------------------------
 
 #[test]
@@ -235,13 +282,11 @@ fn context_window_fit_runs_before_exclusions() {
         "select": [{"minimize": "PredictedTTFT"}]}}]}));
     let mut small = cand("h100", "bar", 100.0);
     small.attrs.context_window = Some(4096);
+    small.attrs.input_tokens = Some(64000);
     let mut big = cand("a100", "bar", 500.0);
     big.attrs.context_window = Some(131072);
-    let attrs = RequestAttrs {
-        input_tokens: Some(64000),
-        ..Default::default()
-    };
-    let out = evaluate(route_of(&p), Some("r"), &attrs, vec![small, big]);
+    big.attrs.input_tokens = Some(64000);
+    let out = evaluate(route_of(&p), Some("r"), &req(), vec![small, big]);
     match out {
         Outcome::Chosen { candidate, trace } => {
             assert_eq!(candidate.backend, "a100", "the 4k endpoint cannot fit 64k");
@@ -258,8 +303,8 @@ fn context_fit_accounts_for_max_tokens() {
     let mut c = cand("h100", "bar", 100.0);
     c.attrs.context_window = Some(8192);
     // 8000 prompt fits, but not with 1000 more tokens of completion.
+    c.attrs.input_tokens = Some(8000);
     let attrs = RequestAttrs {
-        input_tokens: Some(8000),
         max_tokens: Some(1000),
         ..Default::default()
     };
@@ -274,9 +319,23 @@ fn unknown_context_window_does_not_eliminate() {
     // A candidate that doesn't carry the signal isn't dropped by fitting.
     let p = policy(json!({"rules": [{"name": "r", "route": {
         "select": [{"minimize": "PredictedTTFT"}]}}]}));
-    let c = cand("h100", "bar", 100.0); // context_window: None
+    let mut c = cand("h100", "bar", 100.0); // context_window: None
+    c.attrs.input_tokens = Some(999_999);
+    assert!(matches!(
+        evaluate(route_of(&p), Some("r"), &req(), vec![c]),
+        Outcome::Chosen { .. }
+    ));
+}
+
+#[test]
+fn a_candidate_with_no_count_is_taken_to_fit() {
+    // A failed render leaves no count; the request's own count is not used.
+    let p = policy(json!({"rules": [{"name": "r", "route": {
+        "select": [{"minimize": "PredictedTTFT"}]}}]}));
+    let mut c = cand("h100", "bar", 100.0);
+    c.attrs.context_window = Some(4096);
     let attrs = RequestAttrs {
-        input_tokens: Some(999_999),
+        input_tokens: Some(64000),
         ..Default::default()
     };
     assert!(matches!(
@@ -314,31 +373,81 @@ fn guarded_exclusion_sits_out_when_the_guard_misses() {
                      "if": {"inputTokens": {"greaterThan": 32000}},
                      "drop": {"backend": {"name": "a100"}}}],
         "select": [{"minimize": "PredictedTTFT"}]}}]}));
-    // Short prompt: the guard misses, so a100 stays eligible and wins.
-    let short = RequestAttrs {
-        input_tokens: Some(100),
-        ..Default::default()
+    let with_count = |ws: &str, ttft: f32, n: i64| {
+        let mut c = cand(ws, "bar", ttft);
+        c.attrs.input_tokens = Some(n);
+        c
     };
+    // Short prompt: the guard misses, so a100 stays eligible and wins.
     let out = evaluate(
         route_of(&p),
         Some("r"),
-        &short,
-        vec![cand("a100", "bar", 10.0), cand("h100", "bar", 900.0)],
+        &req(),
+        vec![
+            with_count("a100", 10.0, 100),
+            with_count("h100", 900.0, 100),
+        ],
     );
     assert!(matches!(&out, Outcome::Chosen { candidate, .. } if candidate.backend == "a100"));
 
     // Long prompt: the guard fires and a100 is dropped.
-    let long = RequestAttrs {
-        input_tokens: Some(64000),
+    let out = evaluate(
+        route_of(&p),
+        Some("r"),
+        &req(),
+        vec![
+            with_count("a100", 10.0, 64000),
+            with_count("h100", 900.0, 64000),
+        ],
+    );
+    assert!(matches!(&out, Outcome::Chosen { candidate, .. } if candidate.backend == "h100"));
+}
+
+#[test]
+fn a_guard_reads_each_candidates_own_count() {
+    let p = policy(json!({"rules": [{"name": "r", "route": {
+        "exclude": [{"name": "long-prompts",
+                     "if": {"inputTokens": {"greaterThan": 32000}},
+                     "drop": {"backend": {"type": "Local"}}}],
+        "select": [{"type": "Local", "minimize": "PredictedTTFT"}]}}]}));
+    // One prompt, two tokenizers: only `long`'s rendering trips the guard.
+    let mut short = cand("short", "a", 900.0);
+    short.attrs.input_tokens = Some(20000);
+    let mut long = cand("long", "b", 10.0);
+    long.attrs.input_tokens = Some(40000);
+    // The request's count is not consulted.
+    let attrs = RequestAttrs {
+        input_tokens: Some(1),
+        ..Default::default()
+    };
+    let out = evaluate(route_of(&p), Some("r"), &attrs, vec![long, short]);
+    assert!(
+        matches!(&out, Outcome::Chosen { candidate, .. } if candidate.backend == "short"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn a_guard_on_input_tokens_misses_a_candidate_with_no_count() {
+    let p = policy(json!({"rules": [{"name": "r", "route": {
+        "exclude": [{"name": "long-to-cloud",
+                     "if": {"inputTokens": {"greaterThan": 1000}},
+                     "drop": {"backend": {"type": "Provider"}}}],
+        "select": [{"order": ["cloud"]}]}}]}));
+    let attrs = RequestAttrs {
+        input_tokens: Some(5000),
         ..Default::default()
     };
     let out = evaluate(
         route_of(&p),
         Some("r"),
-        &long,
-        vec![cand("a100", "bar", 10.0), cand("h100", "bar", 900.0)],
+        &attrs,
+        vec![prov("cloud", "bar", Some(10.0))],
     );
-    assert!(matches!(&out, Outcome::Chosen { candidate, .. } if candidate.backend == "h100"));
+    assert!(
+        matches!(&out, Outcome::Chosen { candidate, .. } if candidate.backend == "cloud"),
+        "a provider has no count, so the guard misses: {out:?}"
+    );
 }
 
 #[test]
@@ -352,19 +461,17 @@ fn two_guarded_exclusions_in_one_rule_compose() {
         "select": [{"minimize": "PredictedTTFT"}]}}]}));
     let attrs = RequestAttrs {
         tenant: "health-eu".into(),
-        input_tokens: Some(5000),
         ..Default::default()
     };
-    let out = evaluate(
-        route_of(&p),
-        Some("r"),
-        &attrs,
-        vec![
-            cand("us", "bar", 1.0),
-            cand("small", "bar", 2.0),
-            cand("eu-big", "bar", 3.0),
-        ],
-    );
+    let candidates = [("us", 1.0), ("small", 2.0), ("eu-big", 3.0)]
+        .into_iter()
+        .map(|(ws, ttft)| {
+            let mut c = cand(ws, "bar", ttft);
+            c.attrs.input_tokens = Some(5000);
+            c
+        })
+        .collect();
+    let out = evaluate(route_of(&p), Some("r"), &attrs, candidates);
     assert!(
         matches!(&out, Outcome::Chosen { candidate, .. } if candidate.backend == "eu-big"),
         "both exclusions applied: {out:?}"
@@ -851,7 +958,7 @@ fn order_ranks_provider_names_unchanged() {
 }
 
 #[test]
-fn the_context_window_check_applies_to_providers_too() {
+fn the_context_window_check_skips_providers() {
     let p = policy(json!({
         "rules": [{
             "name": "r",
@@ -860,6 +967,7 @@ fn the_context_window_check_applies_to_providers_too() {
     }));
     let mut small = prov("small", "m", Some(10.0));
     small.attrs.context_window = Some(8192);
+    small.attrs.input_tokens = Some(100_000);
     let mut big = prov("big", "m", Some(9000.0));
     big.attrs.context_window = Some(200_000);
     let attrs = RequestAttrs {
@@ -868,10 +976,36 @@ fn the_context_window_check_applies_to_providers_too() {
     };
     let out = evaluate(route_of(&p), Some("r"), &attrs, vec![small, big]);
     assert!(
-        matches!(&out, Outcome::Chosen { candidate, .. } if candidate.backend == "big"),
-        "a declared contextWindow gates a provider exactly as an observed one gates \
-         a worker set: {out:?}"
+        matches!(&out, Outcome::Chosen { candidate, .. } if candidate.backend == "small"),
+        "a provider's declared contextWindow does not gate it: {out:?}"
     );
+}
+
+#[test]
+fn the_context_window_check_uses_each_candidates_own_count() {
+    let p = policy(json!({"rules": [{"name": "r", "route": {
+        "select": [{"order": ["short", "long"]}]}}]}));
+    // One window, two tokenizers: only the shorter rendering fits.
+    let mut short = cand("short", "a", 100.0);
+    short.attrs.context_window = Some(8192);
+    short.attrs.input_tokens = Some(6000);
+    let mut long = cand("long", "b", 100.0);
+    long.attrs.context_window = Some(8192);
+    long.attrs.input_tokens = Some(9000);
+    // The request's count would let both through.
+    let attrs = RequestAttrs {
+        input_tokens: Some(100),
+        ..Default::default()
+    };
+    let out = evaluate(route_of(&p), Some("r"), &attrs, vec![long, short]);
+    match out {
+        Outcome::Chosen { candidate, trace } => {
+            assert_eq!(candidate.backend, "short");
+            assert_eq!(trace.eliminated.len(), 1);
+            assert!(trace.eliminated[0].0.starts_with("long/"));
+        }
+        other => panic!("expected a choice, got {other:?}"),
+    }
 }
 
 /// `type:` on a select tier filters candidates, including on an `order` tier,

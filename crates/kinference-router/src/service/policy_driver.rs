@@ -5,6 +5,8 @@
 //! worker sets and providers; `candidates_for` flattens a scored group into
 //! per-endpoint candidates. Ranking holds no pool lock; see `policy_select`.
 
+use tracing::Instrument as _;
+
 use super::*;
 
 impl KinferenceService {
@@ -22,17 +24,18 @@ impl KinferenceService {
     pub(super) async fn policy_select(
         &self,
         pref: &kinference_policy::PoolRef,
-        store: &Arc<kinference_policy::store::PolicyStore>,
+        snapshot: &kinference_policy::resolve::PolicyIndex,
+        // Groups that the caller has already scored. Their models aren't
+        // rendered again.
         primary: Option<ScoredGroup>,
         // Passed explicitly, since `primary` may not exist (a provider-only
         // model).
         requested_model: &str,
         spare: Option<ScoreInput>,
-        attrs: kinference_policy::predicate::RequestAttrs,
+        mut attrs: kinference_policy::predicate::RequestAttrs,
     ) -> Result<PolicySelection, PickAndRecordOutcome> {
         use kinference_policy::engine;
 
-        let snapshot = store.snapshot();
         let Some(resolved) = snapshot.lookup(&pref.namespace, &pref.name) else {
             // Both fail open, but are logged differently: before the first list
             // completes, every pool looks unknown.
@@ -81,44 +84,84 @@ impl KinferenceService {
         }
 
         let policy = resolved.policy.clone();
-        let rules = engine::matching_rules(&policy, &attrs);
-        let any_rule_matched = !rules.is_empty();
-        // Matching rules, then the implicit unmatched route (`None`, traced as
-        // `<unmatched>`). The unmatched route gets its own candidate generation
-        // (the requested model, local destinations only), so it can't serve a
-        // model an earlier rule scored.
-        let mut plan: Vec<(Option<String>, kinference_policy::compile::CompiledRoute)> = rules
-            .iter()
-            .map(|r| (Some(r.name.clone()), r.route.clone()))
-            .collect();
-        match engine::unmatched_route(&policy) {
-            Ok(route) => plan.push((None, route)),
-            Err(_) if !any_rule_matched => {
-                // `unmatched: Reject`.
-                tracing::debug!(
-                    inference_pool = %pref.label(),
-                    "no policy rule matched; refusing"
-                );
-                self.prom.record_policy_decision("rejected_unmatched");
-                return Err(PickAndRecordOutcome::PolicyRejected {
-                    reason: "no rule matched and unmatched=Reject".to_string(),
-                    model,
-                });
+        // Before the token count is known, every rule that could match once
+        // it is. Then the implicit unmatched route (`None`, traced as
+        // `<unmatched>`), which gets its own candidate generation (the
+        // requested model, local destinations only), so it can't serve a
+        // model an earlier rule scored. Each route's targets are drawn once,
+        // since weighted groups are sampled.
+        let uses_count = policy.uses_input_tokens();
+        let rules = if uses_count {
+            engine::possibly_matching_rules(&policy, &attrs)
+        } else {
+            engine::matching_rules(&policy, &attrs)
+        };
+        let mut plan: Vec<(
+            Option<&kinference_policy::compile::CompiledRule>,
+            kinference_policy::compile::CompiledRoute,
+            Vec<engine::ScoreTarget>,
+        )> = Vec::new();
+        // The loop below never gets past a rule that matches whatever the
+        // count and doesn't fall through, so nothing after it is rendered.
+        let mut reachable = true;
+        for r in rules {
+            let targets = engine::models_to_score(&r.route, &attrs.requested_model);
+            plan.push((Some(r), r.route.clone(), targets));
+            // An entry with no `inputTokens` term matches whatever the count.
+            let sure = r.matches.is_empty()
+                || r.matches
+                    .iter()
+                    .any(|p| !p.tests_input_tokens() && p.matches(&attrs));
+            if sure && !engine::falls_through(&r.route) {
+                reachable = false;
+                break;
             }
-            // Rules matched. If every one falls through, the refusal comes
-            // after the loop.
-            Err(_) => {}
+        }
+        if reachable && let Ok(route) = engine::unmatched_route(&policy) {
+            let targets = engine::models_to_score(&route, &attrs.requested_model);
+            plan.push((None, route, targets));
+        }
+        if plan.is_empty() {
+            // No rule can match, and `unmatched: Reject`.
+            return Err(self.reject_unmatched(pref, model));
         }
 
-        // Groups scored so far, by (pool, model). Others are scored lazily
-        // below.
+        // Groups scored so far, by (pool, model). Every model that the plan
+        // could use starts rendering now, all at once, since render calls are
+        // the costliest part of a pick. The pick then waits only for the
+        // renders that it needs, when it needs them.
         let mut scored: Vec<ScoredGroup> = primary.into_iter().collect();
+        let mut renders = match spare.as_ref() {
+            Some(spare) => {
+                let targets: Vec<&engine::ScoreTarget> =
+                    plan.iter().flat_map(|(_, _, t)| t.iter()).collect();
+                self.start_renders(&targets, &resolved.destinations, &scored, spare)
+            }
+            None => Renders::default(),
+        };
 
-        for (rule_name, route) in &plan {
-            // The name that the client asked for. The loop below resolves it
-            // through each destination's own alias table; see
-            // `engine::models_to_score`.
-            let targets = engine::models_to_score(route, &attrs.requested_model);
+        // The count comes from whichever render finishes first. Which model
+        // that is is not part of the API.
+        if uses_count {
+            attrs.input_tokens = renders.first_count(&mut scored, &self.prom).await;
+            plan.retain(|(rule, _, _)| rule.is_none_or(|r| r.matches(&attrs)));
+            if plan.is_empty() {
+                return Err(self.reject_unmatched(pref, model));
+            }
+            let kept = reached(
+                plan.iter().flat_map(|(_, _, t)| t.iter()),
+                &resolved.destinations,
+            );
+            renders.abort_unless(&local_models(&kept));
+        }
+        let any_rule_matched = plan.iter().any(|(rule, _, _)| rule.is_some());
+
+        for (rule, route, targets) in &plan {
+            let rule_name = rule.map(|r| r.name.clone());
+            let steps = reached(targets.iter(), &resolved.destinations);
+            renders
+                .wait_for(&local_models(&steps), &mut scored, &self.prom)
+                .await;
             let mut candidates: Vec<engine::Candidate> = Vec::new();
             // For each (destination, upstream), the indices of the candidates
             // that the loop has built so far. Two targets can lead to the same
@@ -127,108 +170,105 @@ impl KinferenceService {
             // `tieBreak: Random` toward that destination.
             let mut built: HashMap<(CandidateDest, String), Vec<usize>> = HashMap::new();
 
-            for target in &targets {
-                for dest in &resolved.destinations {
-                    if !target
-                        .backends
-                        .matches(dest.backend_type(), dest.name(), dest.labels())
-                    {
+            for step in steps {
+                // Providers need no scoring; candidates come from the
+                // declared model table.
+                let (target, dest, upstream) = match step {
+                    Reached::Local(target, dest, upstream) => (target, dest, upstream),
+                    Reached::Provider(target, prov) => {
+                        let dest =
+                            CandidateDest::Provider(prov.namespace.clone(), prov.name.clone());
+                        for c in provider_candidates_for(
+                            &self.observations.provider_health,
+                            prov,
+                            &target.model,
+                        ) {
+                            let key = (dest.clone(), c.upstream_model.clone());
+                            if !add_name(&mut candidates, &built, &key, &target.model) {
+                                built.insert(key, vec![candidates.len()]);
+                                candidates.push(c);
+                            }
+                        }
                         continue;
                     }
-                    // Providers need no scoring; candidates come from the
-                    // declared model table.
-                    let dest = match dest {
-                        kinference_policy::resolve::ResolvedDestination::Local(local) => local,
-                        kinference_policy::resolve::ResolvedDestination::Provider(prov) => {
-                            let dest =
-                                CandidateDest::Provider(prov.namespace.clone(), prov.name.clone());
-                            for c in provider_candidates_for(
-                                &self.observations.provider_health,
-                                prov,
-                                &target.model,
-                            ) {
-                                let key = (dest.clone(), c.upstream_model.clone());
-                                if !add_name(&mut candidates, &built, &key, &target.model) {
-                                    built.insert(key, vec![candidates.len()]);
-                                    candidates.push(c);
-                                }
-                            }
+                };
+                let key = (CandidateDest::Local(dest.pool_id), upstream.clone());
+                if add_name(&mut candidates, &built, &key, &target.model) {
+                    continue;
+                }
+                let idx = match scored
+                    .iter()
+                    .position(|g| g.pool.id == dest.pool_id && g.model == upstream)
+                {
+                    Some(i) => i,
+                    None => {
+                        let Some(pool) = self.scoring.pools.snapshot().get(dest.pool_id).cloned()
+                        else {
                             continue;
-                        }
-                    };
-                    // A canonical name can map to several upstream models, each
-                    // its own candidate.
-                    for upstream in dest.upstreams_for(&target.model) {
-                        let key = (CandidateDest::Local(dest.pool_id), upstream.clone());
-                        if add_name(&mut candidates, &built, &key, &target.model) {
+                        };
+                        let Some(spare) = spare.as_ref() else {
+                            // Only reachable if scoring inputs were not
+                            // cloned, which cannot happen when a policy
+                            // is active.
                             continue;
-                        }
-                        let idx = match scored
+                        };
+                        // Another pool of a model that this pick
+                        // already rendered: reuse its tokens, or after
+                        // a failed render, score on load alone.
+                        let cached = scored
                             .iter()
-                            .position(|g| g.pool.id == dest.pool_id && g.model == upstream)
-                        {
-                            Some(i) => i,
-                            None => {
-                                let Some(pool) =
-                                    self.scoring.pools.snapshot().get(dest.pool_id).cloned()
-                                else {
-                                    continue;
-                                };
-                                let Some(spare) = spare.as_ref() else {
-                                    // Only reachable if scoring inputs were not
-                                    // cloned, which cannot happen when a policy
-                                    // is active.
-                                    continue;
-                                };
-                                // Reuse tokens if this model was already
-                                // tokenized for another pool.
-                                let cached = scored
-                                    .iter()
-                                    .find(|g| g.model == upstream && !g.side.tokens.is_empty())
-                                    .map(|g| g.side.tokens.clone());
-                                let input = match cached {
-                                    Some(t) => ScoreInput::tokens(t),
-                                    None => spare.clone(),
-                                };
-                                let (outcome, side) = self
-                                    .scoring
+                            .find(|g| g.model == upstream && g.input_tokens.is_some())
+                            .map(|g| g.side.tokens.clone());
+                        let failed = scored
+                            .iter()
+                            .any(|g| g.model == upstream && g.render_failed());
+                        let (outcome, side) = match cached {
+                            Some(t) => {
+                                self.scoring
                                     .score_workers(
                                         &*self.tokenizer,
                                         &pool,
                                         &upstream,
-                                        input,
+                                        ScoreInput::tokens(t),
                                         HashMap::new(),
                                     )
-                                    .await;
-                                let s = match outcome {
-                                    ScoreOutcome::Ok(r) => r.scores,
-                                    ScoreOutcome::Unavailable(r, why) => {
-                                        self.prom.record_score_degraded(why.as_label());
-                                        r.scores
-                                    }
-                                    // This worker set doesn't serve the model.
-                                    ScoreOutcome::NoWorkers => continue,
-                                };
-                                if s.is_empty() {
-                                    continue;
-                                }
-                                scored.push(ScoredGroup {
-                                    pool,
-                                    model: upstream.clone(),
-                                    scores: s,
-                                    side,
-                                });
-                                scored.len() - 1
+                                    .await
+                            }
+                            None if failed => (
+                                self.scoring.score_load_only(&pool, &upstream),
+                                ScoreSideData::default(),
+                            ),
+                            None => {
+                                self.scoring
+                                    .score_workers(
+                                        &*self.tokenizer,
+                                        &pool,
+                                        &upstream,
+                                        spare.clone(),
+                                        HashMap::new(),
+                                    )
+                                    .await
                             }
                         };
-                        let new = self.candidates_for(&scored[idx], idx, dest, &target.model);
-                        built.insert(
-                            key,
-                            (candidates.len()..candidates.len() + new.len()).collect(),
-                        );
-                        candidates.extend(new);
+                        let Some(group) = ScoredGroup::from_outcome(
+                            pool,
+                            upstream.clone(),
+                            outcome,
+                            side,
+                            &self.prom,
+                        ) else {
+                            continue;
+                        };
+                        scored.push(group);
+                        scored.len() - 1
                     }
-                }
+                };
+                let new = self.candidates_for(&scored[idx], idx, dest, &target.model);
+                built.insert(
+                    key,
+                    (candidates.len()..candidates.len() + new.len()).collect(),
+                );
+                candidates.extend(new);
             }
 
             // Log the cross-group ranking, which the per-group score table
@@ -298,7 +338,7 @@ impl KinferenceService {
                     } else {
                         "unmatched_served"
                     });
-                    if let Some(n) = rule_name {
+                    if let Some(n) = &rule_name {
                         self.prom.record_policy_rule_match(n);
                     }
                     return Ok(selection(&mut scored, candidate));
@@ -342,6 +382,105 @@ impl KinferenceService {
             reason: "every matching rule fell through and unmatched=Reject".to_string(),
             model,
         })
+    }
+
+    /// The refusal for a request that no rule matched, under
+    /// `unmatched: Reject`.
+    fn reject_unmatched(
+        &self,
+        pref: &kinference_policy::PoolRef,
+        model: String,
+    ) -> PickAndRecordOutcome {
+        tracing::debug!(
+            inference_pool = %pref.label(),
+            "no policy rule matched; refusing"
+        );
+        self.prom.record_policy_decision("rejected_unmatched");
+        PickAndRecordOutcome::PolicyRejected {
+            reason: "no rule matched and unmatched=Reject".to_string(),
+            model,
+        }
+    }
+
+    /// Start one render task for each upstream model that `targets` reach on
+    /// a local destination and that no group in `scored` has.
+    ///
+    /// Token ids belong to a model, so each such model costs one render call
+    /// unless that call fails. Each model renders on the first destination
+    /// with a ready worker for it. If that render fails, the task renders on
+    /// the next such destinations, up to `MAX_RENDER_FALLBACKS` of them. The
+    /// candidate loop scores any other pool that serves the same model from
+    /// those tokens, or on load alone when no render succeeded.
+    fn start_renders(
+        &self,
+        targets: &[&kinference_policy::engine::ScoreTarget],
+        destinations: &[kinference_policy::resolve::ResolvedDestination],
+        scored: &[ScoredGroup],
+        spare: &ScoreInput,
+    ) -> Renders {
+        let pools = self.scoring.pools.snapshot();
+        // Per model, the pools to render on, in order.
+        let mut by_model: Vec<(String, Vec<Arc<Pool>>)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for step in reached(targets.iter().copied(), destinations) {
+            let Reached::Local(_, dest, upstream) = step else {
+                continue;
+            };
+            let pool_id = dest.pool_id;
+            if scored.iter().any(|g| g.model == upstream)
+                || !seen.insert((pool_id, upstream.clone()))
+            {
+                continue;
+            }
+            let Some(pool) = pools.get(pool_id).cloned() else {
+                continue;
+            };
+            let ready = pool
+                .registry
+                .workers_for_model(&upstream)
+                .iter()
+                .any(|(_, w)| w.is_ready());
+            if !ready {
+                continue;
+            }
+            match by_model.iter_mut().find(|(m, _)| *m == upstream) {
+                Some((_, on)) if on.len() <= MAX_RENDER_FALLBACKS => on.push(pool),
+                Some(_) => {}
+                None => by_model.push((upstream, vec![pool])),
+            }
+        }
+
+        let mut renders = Renders::default();
+        for (model, on) in by_model {
+            let scoring = self.scoring.clone();
+            let tokenizer = self.tokenizer.clone();
+            // A clone of the input shares the prompt, so each attempt takes
+            // one.
+            let input = spare.clone();
+            let task_model = model.clone();
+            let task = async move {
+                let model = task_model;
+                let mut last = None;
+                for pool in on {
+                    let (outcome, side) = scoring
+                        .score_workers(&*tokenizer, &pool, &model, input.clone(), HashMap::new())
+                        .await;
+                    let failed =
+                        matches!(outcome, ScoreOutcome::Unavailable(_, Degraded::Tokenize));
+                    last = Some((pool, outcome, side));
+                    if !failed {
+                        break;
+                    }
+                }
+                last.map(|(pool, outcome, side)| (pool, model, outcome, side))
+            };
+            // The task keeps the pick's span, so its log lines name the pick.
+            let handle = renders
+                .tasks
+                .spawn(task.instrument(tracing::Span::current()));
+            renders.pending.insert(model, handle);
+        }
+        renders
     }
 
     /// Build one candidate per endpoint in a scored group.
@@ -433,6 +572,9 @@ impl KinferenceService {
                     },
                     attrs: kinference_policy::predicate::CandidateAttrs {
                         context_window: context_by_endpoint.get(&s.endpoint).map(|v| *v as i64),
+                        // `None` after a failed render: the fit then assumes
+                        // that the prompt fits.
+                        input_tokens: group.input_tokens,
                         predicted_ttft_ms: Some(predicted as f64),
                         prefix_cache_hit_ratio: Some(hit_ratio),
                         // Absent, not zero, when the endpoint has not been
@@ -455,6 +597,143 @@ impl KinferenceService {
             })
             .collect()
     }
+}
+
+/// One finished render: the pool and model that it scored, and the outcome.
+type Rendered = (Arc<Pool>, String, ScoreOutcome, ScoreSideData);
+
+/// The render tasks that a pick has started, one per model.
+///
+/// Each task runs on the runtime, so a render advances whether or not the
+/// pick is waiting for it. Dropping the set aborts the tasks that the pick
+/// did not wait for.
+///
+/// A task reports the last pool that it rendered on. A pool whose render
+/// failed before that one has no group, and the candidate loop scores it.
+#[derive(Default)]
+struct Renders {
+    tasks: tokio::task::JoinSet<Option<Rendered>>,
+    /// The models that have no render result yet.
+    pending: HashMap<String, tokio::task::AbortHandle>,
+}
+
+impl Renders {
+    /// Add the next render to finish to `scored`. False when none is left.
+    async fn next(&mut self, scored: &mut Vec<ScoredGroup>, prom: &RouterMetrics) -> bool {
+        loop {
+            match self.tasks.join_next().await {
+                None => return false,
+                Some(Ok(rendered)) => {
+                    if let Some((pool, model, outcome, side)) = rendered {
+                        self.pending.remove(&model);
+                        scored.extend(ScoredGroup::from_outcome(pool, model, outcome, side, prom));
+                    }
+                    return true;
+                }
+                // A task that `abort_unless` stopped.
+                Some(Err(e)) if e.is_cancelled() => {}
+                Some(Err(e)) => std::panic::resume_unwind(e.into_panic()),
+            }
+        }
+    }
+
+    /// Abort the render of every model that is not in `needed`.
+    fn abort_unless(&mut self, needed: &std::collections::HashSet<&str>) {
+        self.pending.retain(|model, task| {
+            let keep = needed.contains(model.as_str());
+            if !keep {
+                task.abort();
+            }
+            keep
+        });
+    }
+
+    /// Wait until no model in `needed` is still rendering.
+    async fn wait_for(
+        &mut self,
+        needed: &std::collections::HashSet<&str>,
+        scored: &mut Vec<ScoredGroup>,
+        prom: &RouterMetrics,
+    ) {
+        while needed.iter().any(|m| self.pending.contains_key(*m)) {
+            if !self.next(scored, prom).await {
+                break;
+            }
+        }
+    }
+
+    /// The first token count that any group has, waiting only until one
+    /// render yields one. `None` when every render failed.
+    async fn first_count(
+        &mut self,
+        scored: &mut Vec<ScoredGroup>,
+        prom: &RouterMetrics,
+    ) -> Option<i64> {
+        loop {
+            if let Some(n) = scored.iter().find_map(|g| g.input_tokens) {
+                return Some(n);
+            }
+            if !self.next(scored, prom).await {
+                return None;
+            }
+        }
+    }
+}
+
+/// One destination that a route's target reaches.
+enum Reached<'a> {
+    /// A local worker set, once per upstream model that it serves under the
+    /// target's name. A canonical name can map to several upstream models.
+    Local(
+        &'a kinference_policy::engine::ScoreTarget,
+        &'a kinference_policy::resolve::ResolvedWorkerSet,
+        String,
+    ),
+    Provider(
+        &'a kinference_policy::engine::ScoreTarget,
+        &'a kinference_policy::resolve::ResolvedProvider,
+    ),
+}
+
+/// Every destination that `targets` reach, by target and then by
+/// destination. The renders and the candidate loop both follow this walk, so
+/// the router renders exactly the models that it builds candidates for.
+fn reached<'a>(
+    targets: impl Iterator<Item = &'a kinference_policy::engine::ScoreTarget>,
+    destinations: &'a [kinference_policy::resolve::ResolvedDestination],
+) -> Vec<Reached<'a>> {
+    use kinference_policy::resolve::ResolvedDestination;
+    let mut out = Vec::new();
+    for target in targets {
+        for dest in destinations {
+            if !target
+                .backends
+                .matches(dest.backend_type(), dest.name(), dest.labels())
+            {
+                continue;
+            }
+            match dest {
+                ResolvedDestination::Provider(prov) => out.push(Reached::Provider(target, prov)),
+                ResolvedDestination::Local(local) => {
+                    for upstream in local.upstreams_for(&target.model) {
+                        out.push(Reached::Local(target, local, upstream));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The upstream models that `steps` reach on local worker sets.
+fn local_models<'s>(steps: &'s [Reached<'_>]) -> std::collections::HashSet<&'s str> {
+    steps
+        .iter()
+        .filter_map(|step| match step {
+            Reached::Local(_, _, upstream) => Some(upstream.as_str()),
+            Reached::Provider(..) => None,
+        })
+        .collect()
 }
 
 /// A destination that the router builds candidates for: a local worker set,

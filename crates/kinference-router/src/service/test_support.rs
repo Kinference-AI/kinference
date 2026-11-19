@@ -296,6 +296,18 @@ impl TestService {
     pub(crate) fn render_calls(&self) -> usize {
         self.render.as_ref().map_or(0, FakeRender::calls)
     }
+
+    /// Every request that the fake `/render` has answered, oldest first.
+    pub(crate) fn render_requests(&self) -> Vec<crate::tokenizer::test_support::Seen> {
+        self.render
+            .as_ref()
+            .map_or_else(Vec::new, FakeRender::requests)
+    }
+
+    /// The most requests that a `Render::Delayed` fake held at once.
+    pub(crate) fn render_peak_concurrency(&self) -> usize {
+        self.render.as_ref().map_or(0, FakeRender::peak_concurrency)
+    }
 }
 
 fn cr<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> Arc<T> {

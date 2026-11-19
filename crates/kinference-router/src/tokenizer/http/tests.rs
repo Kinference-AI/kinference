@@ -136,9 +136,9 @@ async fn a_raw_body_is_forwarded_verbatim() {
     let fake = FakeRender::start(Render::Tokens(vec![1])).await;
     let scrape = Arc::new(MetricsRegistry::new());
     let workers = [(1, at(&fake, "10.0.0.1:8000"))];
-    let body = br#"{"model":"m","messages":[],"x":1}"#;
+    let body = bytes::Bytes::from_static(br#"{"model":"m","messages":[],"x":1}"#);
     let mut req = request(&workers, "m", raw());
-    req.raw_body = Some(body);
+    req.raw_body = Some(&body);
 
     let out = backend(&scrape).render(&req).await;
     assert_eq!(out, TokenizeOutcome::Ok(vec![1]));

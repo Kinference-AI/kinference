@@ -223,6 +223,11 @@ impl CompiledRule {
     pub fn matches(&self, attrs: &super::predicate::RequestAttrs) -> bool {
         self.matches.is_empty() || self.matches.iter().any(|p| p.matches(attrs))
     }
+
+    /// [`Self::matches`] with every `inputTokens` term taken as true.
+    pub fn may_match(&self, attrs: &super::predicate::RequestAttrs) -> bool {
+        self.matches.is_empty() || self.matches.iter().any(|p| p.may_match(attrs))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -236,6 +241,15 @@ pub struct CompiledPolicy {
 }
 
 impl CompiledPolicy {
+    /// True when a rule's `matches` tests `inputTokens`. Only then does the
+    /// router need a token count before it knows which rules match. An
+    /// exclusion's `if:` reads each candidate's own count instead.
+    pub fn uses_input_tokens(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|r| r.matches.iter().any(|p| p.tests_input_tokens()))
+    }
+
     /// The implicit policy for a pool with no `policyRef`, and for traffic that
     /// matches no rule: serve as asked, with no exclusions (not even a queue
     /// threshold).

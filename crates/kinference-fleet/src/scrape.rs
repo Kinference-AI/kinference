@@ -338,6 +338,12 @@ impl MetricsRegistry {
         self.by_worker.insert(worker_id_num, sample);
     }
 
+    /// Record `info` as this worker's served-models list. Test-only.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn record_models_for_test(&self, worker_id_num: u64, info: ModelsInfo) {
+        self.models_by_worker.insert(worker_id_num, info);
+    }
+
     /// Snapshot of the worker's served-models list. Empty `Default` when
     /// the worker isn't being scraped for /v1/models (no http_url) or no
     /// refresh has yet succeeded.

@@ -159,7 +159,11 @@ spec:
                               if:
                                 description: |-
                                   Request parameters to which this exclusion
-                                  applies. A single clause, ANDed.
+                                  applies. A single clause, ANDed. The router
+                                  evaluates it for each candidate, with
+                                  inputTokens as that candidate's own count. A
+                                  candidate with no count, such as a provider,
+                                  misses an inputTokens term.
                                 type: object
                                 properties:
                                   model:         {x-kubernetes-preserve-unknown-fields: true}

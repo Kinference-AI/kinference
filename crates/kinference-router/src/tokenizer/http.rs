@@ -262,7 +262,7 @@ fn parse_render_response(json: &[u8]) -> Result<Vec<u32>, Error> {
 async fn render_via_vllm_raw(
     client: &reqwest::Client,
     base: &str,
-    raw_body: &[u8],
+    raw_body: &bytes::Bytes,
 ) -> Result<Vec<u32>, Error> {
     let url = format!("{}/v1/chat/completions/render", base.trim_end_matches('/'));
     render_post_raw_at_url(client, &url, raw_body).await
@@ -273,7 +273,7 @@ async fn render_via_vllm_raw(
 async fn render_post_raw_at_url(
     client: &reqwest::Client,
     url: &str,
-    raw_body: &[u8],
+    raw_body: &bytes::Bytes,
 ) -> Result<Vec<u32>, Error> {
     let render = |source| Error::Render {
         url: url.to_string(),
@@ -282,7 +282,8 @@ async fn render_post_raw_at_url(
     let resp = client
         .post(url)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(raw_body.to_vec())
+        // A `Bytes` clone shares the buffer, so a retry copies nothing.
+        .body(raw_body.clone())
         .send()
         .await
         .map_err(render)?;
