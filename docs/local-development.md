@@ -48,8 +48,7 @@ The recipe applies the manifests in
   are garbage, but `/metrics`, `/v1/models` and the KV events on port 5557
   are real. The CPU backend uses 128-token blocks.
 - `workerset.yaml`: the `dummy` InferenceWorkerSet. It points at the
-  `dummy-vllm` Service, sets `kvBlockSize: 128` and declares the alias
-  `dummy`.
+  `dummy-vllm` Service and declares the alias `dummy`.
 - `pool.yaml`: the `smoke` InferencePool, with that worker set as its one
   destination.
 
@@ -213,7 +212,7 @@ jq -c '.inflight_overlap_blocks | fromjson' observations.jsonl
 - `kinference_index_blocks` stays 0: the prompt was shorter than a block,
   or someone set `KINFERENCE_DISABLE_INGEST`. Kinference learns each
   worker's block size from the worker's KV events and logs one INFO line
-  with the `block_size` when it does. Kinference ignores `kvBlockSize`.
+  with the `block_size` when it does.
   `kinference_kv_events_skipped_total` counts the events that ingest
   skips, by reason.
 

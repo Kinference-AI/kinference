@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: implemented
 date: 2026-11-13
 author: Zahari Dichev
 issue: 86
