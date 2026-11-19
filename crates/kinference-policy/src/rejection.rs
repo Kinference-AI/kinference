@@ -18,10 +18,6 @@ pub enum RejectReason {
     /// `spec.profile` names a profile the router does not define. Carries the
     /// defined names, since this is usually a typo.
     UnknownProfile { defined: Vec<String> },
-    /// `spec.kvBlockSize` absent, same provenance as `MissingProfile`.
-    MissingKvBlockSize,
-    /// `spec.kvBlockSize` is zero, which the schema forbids.
-    InvalidKvBlockSize { got: u32 },
     /// `spec.serviceRef.name` is empty, so there is nothing to watch.
     MissingServiceRef,
     /// A `spec.models` row carries no `name`, so its aliases would resolve to
@@ -42,10 +38,6 @@ impl std::fmt::Display for RejectReason {
                 "spec.profile names an undefined routing profile; the router defines [{}]",
                 defined.join(", ")
             ),
-            Self::MissingKvBlockSize => write!(f, "spec.kvBlockSize is required"),
-            Self::InvalidKvBlockSize { got } => {
-                write!(f, "spec.kvBlockSize must be > 0, got {got}")
-            }
             Self::MissingServiceRef => write!(f, "spec.serviceRef.name is required"),
             Self::ModelMissingName => write!(
                 f,
@@ -68,8 +60,6 @@ impl RejectReason {
         match self {
             Self::MissingProfile => "MissingProfile",
             Self::UnknownProfile { .. } => "UnknownProfile",
-            Self::MissingKvBlockSize => "MissingKvBlockSize",
-            Self::InvalidKvBlockSize { .. } => "InvalidKvBlockSize",
             Self::MissingServiceRef => "MissingServiceRef",
             Self::ModelMissingName => "ModelMissingName",
             Self::KvEventsMissingPort => "KvEventsMissingPort",

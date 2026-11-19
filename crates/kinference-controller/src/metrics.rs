@@ -8,11 +8,9 @@ use kinference_fleet::metrics::{int_counter, int_counter_vec, int_gauge, int_gau
 /// `kinference_workerset_rejected_total{reason}`.
 /// Source: `kinference_policy::rejection::RejectReason::as_condition_reason`.
 /// CamelCase, since these double as Kubernetes condition reasons.
-const WORKERSET_REJECT_REASONS: [&str; 7] = [
+const WORKERSET_REJECT_REASONS: [&str; 5] = [
     "MissingProfile",
     "UnknownProfile",
-    "MissingKvBlockSize",
-    "InvalidKvBlockSize",
     "MissingServiceRef",
     "ModelMissingName",
     "KvEventsMissingPort",

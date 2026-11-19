@@ -573,7 +573,6 @@ fn listed_snapshot() -> Arc<kinference_policy::resolve::PolicyIndex> {
                 port: None,
             },
             profile: Some("h100".into()),
-            kv_block_size: Some(16),
             ..Default::default()
         },
         status: None,

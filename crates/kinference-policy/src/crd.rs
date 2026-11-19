@@ -65,10 +65,6 @@ pub struct InferenceWorkerSetSpec {
     /// Required by the schema; see the module docs for why it is `Option`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
-    /// Not read. Kinference learns each worker's block size from the
-    /// worker's KV events.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kv_block_size: Option<u32>,
     /// Where Prometheus metrics are served, if not on the OpenAI port.
     ///
     /// Unset uses the port named `metrics` if the Service has one, else

@@ -63,7 +63,6 @@ fn worker_set(name: &str, service: &str, labels: &[(&str, &str)]) -> Arc<Inferen
             },
             // Required by the CRD, so set by default.
             profile: Some("h100".into()),
-            kv_block_size: Some(16),
             ..Default::default()
         },
         status: None,
@@ -696,7 +695,7 @@ fn an_unresolved_destination_reports_the_resolvers_reason() {
         },
         Rejection {
             key: crate::PoolKey::namespaced("infra", "workers-a100"),
-            reason: RejectReason::MissingKvBlockSize,
+            reason: RejectReason::ModelMissingName,
         },
     ]);
     let idx = resolve_local(
@@ -719,7 +718,7 @@ fn an_unresolved_destination_reports_the_resolvers_reason() {
         "got {reasons:?}"
     );
     assert!(
-        reasons.contains(&UnresolvedReason::InvalidKvBlockSize),
+        reasons.contains(&UnresolvedReason::Incomplete),
         "got {reasons:?}"
     );
 }

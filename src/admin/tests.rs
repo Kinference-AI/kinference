@@ -794,13 +794,12 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
         namespace: Some("default".into()),
         ..Default::default()
     };
-    let ws = |name: &str, block: u32| {
+    let ws = |name: &str| {
         Arc::new(InferenceWorkerSet {
             metadata: meta(name),
             spec: serde_json::from_value::<InferenceWorkerSetSpec>(serde_json::json!({
                 "serviceRef": { "name": format!("{name}-svc"), "port": "http" },
                 "profile": "default",
-                "kvBlockSize": block,
             }))
             .expect("valid worker set spec"),
             status: None,
@@ -854,7 +853,7 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
             .expect("valid policy spec"),
             status: None,
         })],
-        &[ws("big-blocks", 256), ws("small-blocks", 16)],
+        &[ws("big-blocks"), ws("small-blocks")],
         &[],
         &[],
         &[],

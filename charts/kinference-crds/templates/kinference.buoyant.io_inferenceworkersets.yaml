@@ -40,13 +40,6 @@ spec:
                 type: string
                 minLength: 1
                 maxLength: 253
-              kvBlockSize:
-                description: |-
-                  Ignored. KInference learns each worker's block size from
-                  the worker's KV-cache events.
-                type: integer
-                minimum: 1
-                maximum: 4096
               metricsPort:
                 description: |-
                   Prometheus metrics port. If unset, resolves to the port named
