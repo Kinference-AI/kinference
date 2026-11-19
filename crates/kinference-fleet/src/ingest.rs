@@ -19,19 +19,23 @@
 //! reimplemented here because dynamo's are `pub(super)`.
 use std::error::Error as StdError;
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::time::{Duration, Instant};
 
 use dynamo_kv_router::indexer::KvIndexerInterface;
-use dynamo_kv_router::protocols::{KvCacheEventData, WorkerWithDpRank};
+use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent, WorkerWithDpRank};
 use dynamo_kv_router::recovery::{CursorObservation, CursorState};
 use dynamo_kv_router::zmq_wire::{
-    KvEventBatch, RawKvEvent, ZmqEventFilterReason, ZmqEventNormalizer, decode_event_batch,
+    KvCacheSpecKind, KvEventBatch, RawKvEvent, ZmqEventFilterReason, ZmqEventNormalizer,
+    convert_event, decode_event_batch,
 };
 use tokio::io::unix::AsyncFd;
 
 use crate::error::Error;
 use crate::metrics::IngestEvent;
 use crate::pool::WorkerContext;
+use crate::workers::{AttentionKind, IndexedGroup};
 
 /// Per-recv DEALER timeout, keeping the replay loop responsive.
 const REPLAY_DEALER_RCVTIMEO_MS: i32 = 500;
@@ -130,23 +134,38 @@ pub fn spawn_worker_listener(ctx: WorkerContext, ingest: IngestConfig) {
 
 /// What ingest remembers about one worker across reconnects. The radix tree
 /// keeps the worker's blocks across a reconnect, so this state must too.
-#[derive(Default)]
 struct WorkerMemory {
-    /// Whether ingest has indexed a stored block for this worker. Until
-    /// then the tree holds nothing that a `BlockRemoved` event could remove.
+    /// Whether the tree holds a stored block of this worker. Until then
+    /// the tree holds nothing that a `BlockRemoved` event could remove.
     stored_indexed: bool,
-    /// The plausible mismatching block sizes that ingest has warned about,
-    /// capped at [`MAX_WARNED_BLOCK_SIZES`].
-    warned_block_sizes: Vec<u32>,
-    warned_block_size_cap: bool,
+    /// The one group whose events ingest indexes, for every data parallel
+    /// rank of the worker.
+    indexed: Option<IndexedGroup>,
+    /// Filters events by attention kind only. `convert_event` gets the
+    /// block size with each event. The normalizer holds the kind of each
+    /// group, which a `BlockRemoved` event may not name.
+    normalizer: ZmqEventNormalizer,
+    /// Caps dynamo's own warnings about blocks that it can't convert.
+    convert_warnings: Arc<AtomicU32>,
     warned_implausible_block_size: bool,
 }
 
-/// Per-listener mutable state: the cursor (for gap detection) and the event
-/// normalizer, built once from the pool's `kv_block_size`.
+impl Default for WorkerMemory {
+    fn default() -> Self {
+        Self {
+            stored_indexed: false,
+            indexed: None,
+            normalizer: ZmqEventNormalizer::new(0),
+            convert_warnings: Arc::default(),
+            warned_implausible_block_size: false,
+        }
+    }
+}
+
+/// Per-listener mutable state: the cursor (for gap detection) and the
+/// worker's memory.
 struct ListenerState<'a> {
     cursor: CursorState,
-    normalizer: ZmqEventNormalizer,
     memory: &'a mut WorkerMemory,
     /// Which warnings this listener has logged, so each logs once.
     warned: ListenerWarnings,
@@ -270,7 +289,6 @@ async fn run_listener(
     memory: &mut WorkerMemory,
 ) -> Result<(), Error> {
     let cfg = &ctx.cfg;
-    let block_size = ctx.block_size;
     let workers = &ctx.registry;
     let cancel = &ctx.cancel;
     let worker_id_num = cfg.worker_id_num;
@@ -300,7 +318,6 @@ async fn run_listener(
 
     let mut state = ListenerState {
         cursor: CursorState::Initial,
-        normalizer: ZmqEventNormalizer::new(block_size),
         memory,
         warned: ListenerWarnings::default(),
     };
@@ -668,8 +685,12 @@ async fn apply_batch(
     let worker = WorkerWithDpRank::new(worker_id_num, effective_dp_rank);
     for raw_event in batch.events {
         // The normalizer filters the events of non-main attention groups
-        // first, so their smaller blocks never count as a mismatch.
-        let raw_event = match state.normalizer.preprocess_with_reason(raw_event, worker) {
+        // first, so their blocks never set the worker's block size.
+        let raw_event = match state
+            .memory
+            .normalizer
+            .preprocess_with_reason(raw_event, worker)
+        {
             Ok(raw_event) => raw_event,
             Err(reason) => {
                 // The other reasons name events that the index never holds
@@ -685,24 +706,44 @@ async fn apply_batch(
             }
         };
         let skip = match &raw_event {
-            RawKvEvent::BlockStored { block_size, .. }
-                if *block_size != ctx.block_size as usize =>
-            {
-                Some(warn_block_size_mismatch(ctx, state.memory, *block_size))
+            RawKvEvent::BlockStored {
+                block_size,
+                group_idx,
+                kv_cache_spec_kind,
+                ..
+            } => {
+                let group_idx = group_idx.unwrap_or(0);
+                select_group(
+                    ctx,
+                    state.memory,
+                    seq,
+                    group_idx,
+                    *kv_cache_spec_kind,
+                    *block_size,
+                )
+                .await
             }
-            RawKvEvent::BlockRemoved { .. } if !state.memory.stored_indexed => {
-                Some(SKIP_NOTHING_STORED)
-            }
+            RawKvEvent::BlockRemoved { group_idx, .. } => match state.memory.indexed {
+                Some(g) if g.group_idx != group_idx.unwrap_or(0) => Some(SKIP_UNINDEXED_GROUP),
+                _ if !state.memory.stored_indexed => Some(SKIP_NOTHING_STORED),
+                _ => None,
+            },
             _ => None,
         };
         if let Some(reason) = skip {
             ctx.prom.record_kv_event_skipped(&ctx.pool_name, reason);
             continue;
         }
-        let Some(placement_event) = state
-            .normalizer
-            .normalize_preprocessed(raw_event, seq, worker)
-        else {
+        // Only a `BlockStored` event reads the block size, and `select_group`
+        // has set one by then.
+        let block_size = state.memory.indexed.map_or(0, |g| g.block_size);
+        let Some(placement_event) = convert_event(
+            raw_event,
+            seq,
+            block_size,
+            worker,
+            &state.memory.convert_warnings,
+        ) else {
             continue;
         };
         let Some(router_event) = placement_event.into_router_event() else {
@@ -734,10 +775,14 @@ async fn apply_batch(
     }
 }
 
-/// The `reason` label for a `BlockStored` event whose block size differs
-/// from the worker set's `kvBlockSize`. The normalizer would index none of
-/// the event's blocks.
+/// The `reason` label for a `BlockStored` event of the worker's indexed
+/// group at a smaller block size than the worker's. vLLM publishes one when
+/// a prompt ends inside a block.
 const SKIP_BLOCK_SIZE_MISMATCH: &str = "block_size_mismatch";
+
+/// The `reason` label for an event of a main attention group that ingest
+/// doesn't index for the worker.
+const SKIP_UNINDEXED_GROUP: &str = "unindexed_attention_group";
 
 /// The `reason` label for a `BlockStored` event whose block size is 0 or
 /// above [`MAX_PLAUSIBLE_BLOCK_SIZE`].
@@ -750,62 +795,117 @@ const SKIP_NOTHING_STORED: &str = "nothing_stored";
 /// KV block sizes are small (SGLang page-size 1, vLLM 16, Gemma 256). A
 /// larger size is a misframed message, or a hybrid model's Mamba state block
 /// (e.g. 1568 tokens) from a vLLM build that doesn't tag events with
-/// `kv_cache_spec_kind`. Neither says anything about `kvBlockSize`.
+/// `kv_cache_spec_kind`.
 const MAX_PLAUSIBLE_BLOCK_SIZE: usize = 1024;
 
-/// How many distinct plausible mismatching block sizes ingest warns about
-/// for one worker.
-const MAX_WARNED_BLOCK_SIZES: usize = 8;
+/// What ingest does with a `BlockStored` event of a main attention group.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    /// Index the event at the worker's block size.
+    Index,
+    Skip(&'static str),
+    /// The event's group and block size become the worker's.
+    Select,
+}
 
-/// Warn about a `BlockStored` event at a block size other than
-/// `kvBlockSize`, once per worker and block size, and return the skip
-/// reason. Implausible sizes share one line per worker.
-fn warn_block_size_mismatch(
+/// The indexed group is the group with the lowest `group_idx` that has sent
+/// a `BlockStored` event, at the largest block size that the group has
+/// stated. vLLM names the blocks of every group from one chain of engine
+/// hashes, so the tree can hold one group per worker.
+fn classify(indexed: Option<IndexedGroup>, group_idx: u32, block_size: u32) -> Verdict {
+    let Some(g) = indexed else {
+        return Verdict::Select;
+    };
+    if group_idx > g.group_idx {
+        return Verdict::Skip(SKIP_UNINDEXED_GROUP);
+    }
+    if group_idx < g.group_idx || block_size > g.block_size {
+        return Verdict::Select;
+    }
+    if block_size < g.block_size {
+        return Verdict::Skip(SKIP_BLOCK_SIZE_MISMATCH);
+    }
+    Verdict::Index
+}
+
+/// Decide whether ingest indexes a `BlockStored` event of a main attention
+/// group, and return the skip reason when it doesn't. A change of the
+/// indexed group or of the block size first clears the worker's blocks.
+async fn select_group(
     ctx: &WorkerContext,
     memory: &mut WorkerMemory,
+    seq: u64,
+    group_idx: u32,
+    kind: Option<KvCacheSpecKind>,
     block_size: usize,
-) -> &'static str {
+) -> Option<&'static str> {
     if block_size == 0 || block_size > MAX_PLAUSIBLE_BLOCK_SIZE {
         if !std::mem::replace(&mut memory.warned_implausible_block_size, true) {
             tracing::warn!(
                 workerset = ctx.pool_name,
                 worker_id = ctx.cfg.worker_id_str,
                 block_size,
-                kv_block_size = ctx.block_size,
                 "skipping KV events with an implausible block size"
             );
         }
-        return SKIP_IMPLAUSIBLE_BLOCK_SIZE;
+        return Some(SKIP_IMPLAUSIBLE_BLOCK_SIZE);
     }
     // Lossless: the size is at most `MAX_PLAUSIBLE_BLOCK_SIZE`.
     let block_size = block_size as u32;
-    if memory.warned_block_sizes.contains(&block_size) {
-        return SKIP_BLOCK_SIZE_MISMATCH;
+    match classify(memory.indexed, group_idx, block_size) {
+        Verdict::Index => return None,
+        Verdict::Skip(reason) => return Some(reason),
+        Verdict::Select => {}
     }
-    if memory.warned_block_sizes.len() < MAX_WARNED_BLOCK_SIZES {
-        memory.warned_block_sizes.push(block_size);
-        tracing::warn!(
-            workerset = ctx.pool_name,
-            worker_id = ctx.cfg.worker_id_str,
-            block_size,
-            kv_block_size = ctx.block_size,
-            "skipping KV events whose block size differs from kvBlockSize"
-        );
-    } else if !std::mem::replace(&mut memory.warned_block_size_cap, true) {
-        tracing::warn!(
-            workerset = ctx.pool_name,
-            worker_id = ctx.cfg.worker_id_str,
-            "more mismatching block sizes are not logged"
-        );
+
+    // The worker's blocks belong to the old group or the old block size.
+    if memory.indexed.is_some() {
+        clear_worker_blocks(ctx, seq).await;
+        memory.stored_indexed = false;
     }
-    SKIP_BLOCK_SIZE_MISMATCH
+    let group = IndexedGroup {
+        group_idx,
+        kind: kind.and_then(attention_kind),
+        block_size,
+    };
+    memory.indexed = Some(group);
+    ctx.registry.set_indexed_group(ctx.cfg.worker_id_num, group);
+    tracing::info!(
+        workerset = ctx.pool_name,
+        worker_id = ctx.cfg.worker_id_str,
+        group_idx,
+        kind = group.kind.map(AttentionKind::as_str),
+        block_size,
+        "indexed group selected"
+    );
+    None
 }
 
-fn log_event(
-    worker_id_str: &str,
-    seq: u64,
-    router_event: &dynamo_kv_router::protocols::RouterEvent,
-) {
+/// Remove every block of the worker from the radix tree. The clear goes
+/// through the event channel, so it stays ahead of the `BlockStored` event
+/// that follows it.
+async fn clear_worker_blocks(ctx: &WorkerContext, seq: u64) {
+    let cleared = KvCacheEvent {
+        event_id: seq,
+        data: KvCacheEventData::Cleared,
+        dp_rank: 0,
+    };
+    ctx.prom.record_index_event(IngestEvent::Cleared, 0);
+    ctx.indexer
+        .apply_event(RouterEvent::new(ctx.cfg.worker_id_num, cleared))
+        .await;
+}
+
+fn attention_kind(kind: KvCacheSpecKind) -> Option<AttentionKind> {
+    match kind {
+        KvCacheSpecKind::FullAttention => Some(AttentionKind::Full),
+        KvCacheSpecKind::MlaAttention => Some(AttentionKind::Mla),
+        KvCacheSpecKind::SinkFullAttention => Some(AttentionKind::SinkFull),
+        _ => None,
+    }
+}
+
+fn log_event(worker_id_str: &str, seq: u64, router_event: &RouterEvent) {
     match &router_event.event.data {
         KvCacheEventData::Stored(data) => {
             let parent_hash = data.parent_hash.map(|h| h.0);

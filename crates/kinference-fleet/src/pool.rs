@@ -299,7 +299,6 @@ pub struct WorkerContext {
     pub endpoint_key: String,
     pub pool_id: PoolId,
     pub pool_name: String,
-    pub block_size: u32,
     pub registry: Arc<WorkerRegistry>,
     pub indexer: Arc<KvIndexer>,
     pub inflight_prefixes: Arc<InflightPrefixes>,

@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Mutex;
 
 use dashmap::DashMap;
@@ -65,6 +65,35 @@ pub struct WorkerRegistry {
     canonical_models: Mutex<Option<BTreeSet<String>>>,
 }
 
+/// The kind of a main attention group, as vLLM names it in a KV event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AttentionKind {
+    Full,
+    Mla,
+    SinkFull,
+}
+
+impl AttentionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full_attention",
+            Self::Mla => "mla_attention",
+            Self::SinkFull => "sink_full_attention",
+        }
+    }
+}
+
+/// One KV cache group of a worker, at the block size that ingest cuts its
+/// events into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexedGroup {
+    pub group_idx: u32,
+    /// `None` when the engine's events name no kind.
+    pub kind: Option<AttentionKind>,
+    /// Tokens per block.
+    pub block_size: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkerEntry {
     pub worker_id_str: String,
@@ -77,9 +106,9 @@ pub struct WorkerEntry {
     /// HTTP base URL for the engine's OpenAI-compatible `/tokenize`. `None`
     /// if not configured.
     pub http_url: Option<String>,
-    /// KV-cache hash block size, the worker set's `kv_block_size`. Ingest
-    /// skips a worker's events at any other block size.
-    pub block_size: u32,
+    /// The KV cache group that ingest indexes for this worker. `None` until
+    /// the worker's first `BlockStored` event.
+    pub indexed_group: Option<IndexedGroup>,
     /// True once the ZMQ listener has finished its initial replay-drain and is
     /// receiving live. Part of [`Self::is_ready`]. Sticky across libzmq
     /// reconnects.
@@ -111,15 +140,18 @@ impl WorkerEntry {
     /// True when this worker can be picked: `/v1/models` has been scraped and
     /// the ZMQ listener has finished its initial sync. `score_workers` only
     /// considers ready workers, and `/readyz` passes when any worker is ready.
-    ///
-    /// A block-size mismatch evicts the worker rather than failing readiness.
     pub fn is_ready(&self) -> bool {
         self.initial_sync_complete && !self.current_models.is_empty()
     }
 
+    /// The block size of the worker's indexed group.
+    pub fn block_size(&self) -> Option<u32> {
+        self.indexed_group.map(|g| g.block_size)
+    }
+
     /// Build a `WorkerEntry` from a `WorkerConfig`, with `model_name` as the
-    /// hint and `block_size` from the worker set.
-    pub fn from_config(w: &WorkerConfig, block_size: u32) -> Self {
+    /// hint.
+    pub fn from_config(w: &WorkerConfig) -> Self {
         // See the `score_addr` field doc.
         let score_addr = w
             .endpoint
@@ -132,7 +164,7 @@ impl WorkerEntry {
             model_name_hint: hint,
             current_models: Vec::new(),
             http_url: w.http_url.clone(),
-            block_size,
+            indexed_group: None,
             initial_sync_complete: false,
             kv_events_observed: false,
             score_addr,
@@ -146,6 +178,21 @@ impl WorkerEntry {
             instance_type: w.instance_type.clone(),
         }
     }
+}
+
+/// The block size that most of `entries` have learned, the smaller one on a
+/// tie. `None` when no entry has a block size.
+pub fn most_common_block_size<'a>(
+    entries: impl IntoIterator<Item = &'a WorkerEntry>,
+) -> Option<u32> {
+    let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
+    for size in entries.into_iter().filter_map(WorkerEntry::block_size) {
+        *counts.entry(size).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(size, n)| (*n, std::cmp::Reverse(*size)))
+        .map(|(size, _)| size)
 }
 
 impl WorkerRegistry {
@@ -374,6 +421,14 @@ impl WorkerRegistry {
                 true
             }
             None => false,
+        }
+    }
+
+    /// Record the group that ingest now indexes for this worker. Ingest is
+    /// the only writer.
+    pub fn set_indexed_group(&self, worker_id_num: u64, group: IndexedGroup) {
+        if let Some(mut entry) = self.by_num.get_mut(&worker_id_num) {
+            entry.value_mut().indexed_group = Some(group);
         }
     }
 

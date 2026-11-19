@@ -18,7 +18,7 @@ fn make_worker(
         queue_swapped: 0,
         kv_cache_usage: kv,
         completion_rate_per_sec: completion,
-        block_size: 16,
+        block_size: Some(16),
     }
 }
 
@@ -1208,6 +1208,30 @@ fn replication_skipped_when_already_at_target() {
         "expected a warm worker; got {}",
         picked.worker.endpoint
     );
+}
+
+/// Each worker is warm against its own block count: a worker with larger
+/// blocks holds most of the prompt in fewer blocks.
+#[test]
+fn replication_counts_a_warm_worker_with_larger_blocks() {
+    let (predictor, picker) = replication_cfg();
+    let workers = vec![
+        // 95 of 100 small blocks: 50ms, the normal pick.
+        make_worker("small:1", 95, 100, 0, 1.0, 0.0),
+        // 19 of 25 large blocks: 60ms, and warm.
+        make_worker("large:1", 19, 25, 0, 1.0, 0.0),
+        make_worker("cold:1", 0, 100, 0, 1.0, 0.0),
+    ];
+    let inflight = zero_inflight(&workers);
+    let workload = zero_workload(&workers);
+    let kv = vec![95_u32, 19, 0];
+    let picked = pick_endpoint(&inputs(
+        &workers, &predictor, &picker, &inflight, &workload, &kv,
+    ))
+    .expect("non-empty");
+    // Two workers are warm already, so the picker redirects to neither
+    // `large:1` nor `cold:1`.
+    assert_eq!(picked.worker.endpoint, "small:1");
 }
 
 #[test]

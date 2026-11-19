@@ -26,7 +26,7 @@ use kinference_fleet::FleetHandles;
 use kinference_fleet::models::ModelIndex;
 use kinference_fleet::pool::Pool;
 use kinference_fleet::scrape::MetricsRegistry;
-use kinference_fleet::workers::WorkerEntry;
+use kinference_fleet::workers::{WorkerEntry, most_common_block_size};
 use kinference_policy::provider_health::ProviderHealthStore;
 use kinference_policy::store::PolicyStore;
 use prometheus::Registry;
@@ -540,7 +540,7 @@ impl KinferenceService {
 fn worker_score(
     entry: &WorkerEntry,
     sample: &kinference_fleet::scrape::MetricsSample,
-    block_size: u32,
+    block_size: Option<u32>,
     matched_blocks: u32,
     total_blocks: u32,
 ) -> WorkerScore {

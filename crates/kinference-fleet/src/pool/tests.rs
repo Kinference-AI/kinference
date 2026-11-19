@@ -434,10 +434,8 @@ async fn changing_the_declared_model_list_reseeds_the_live_workers() {
     h.mgr.reconcile(vec![first]);
 
     let pool = h.mgr.live_pool(&PoolKey::local("a")).unwrap().clone();
-    pool.registry.register(
-        1,
-        crate::workers::WorkerEntry::from_config(&worker_cfg(1), 16),
-    );
+    pool.registry
+        .register(1, crate::workers::WorkerEntry::from_config(&worker_cfg(1)));
     pool.registry.set_served_models(1, &["old".to_string()]);
     h.models.associate(pool.id, "a", &["old".to_string()]);
 

@@ -72,7 +72,11 @@ fn entry(num: u64, models: &[&str]) -> WorkerEntry {
         model_name_hint: None,
         current_models: models.iter().map(|m| m.to_string()).collect(),
         http_url: None,
-        block_size: 16,
+        indexed_group: Some(crate::workers::IndexedGroup {
+            group_idx: 0,
+            kind: None,
+            block_size: 16,
+        }),
         initial_sync_complete: true,
         kv_events_observed: true,
         score_addr: format!("10.0.0.{num}:8000"),

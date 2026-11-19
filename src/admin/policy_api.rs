@@ -1012,7 +1012,7 @@ fn predict(
         queue_running: 0,
         queue_swapped: 0,
         kv_cache_usage: 0.0,
-        block_size,
+        block_size: Some(block_size),
         total_blocks,
     };
     // No inflight summaries for a hypothetical request.

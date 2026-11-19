@@ -9,7 +9,11 @@ fn ready_entry() -> WorkerEntry {
         model_name_hint: Some("gemma".into()),
         current_models: vec!["gemma".into()],
         http_url: Some("http://10.0.0.1:8000/".into()),
-        block_size: 16,
+        indexed_group: Some(kinference_fleet::workers::IndexedGroup {
+            group_idx: 0,
+            kind: None,
+            block_size: 16,
+        }),
         initial_sync_complete: true,
         kv_events_observed: true,
         score_addr: "10.0.0.1:8000".into(),

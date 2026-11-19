@@ -644,9 +644,9 @@ impl KinferenceService {
                 .iter()
                 .zip(dispatches_per_worker.iter())
                 .map(|(s, dispatches)| {
-                    let query_set: std::collections::HashSet<u64> = score_side
-                        .hashes_by_block_size
-                        .get(&s.block_size)
+                    let query_set: std::collections::HashSet<u64> = s
+                        .block_size
+                        .and_then(|b| score_side.hashes_by_block_size.get(&b))
                         .map(|v| v.iter().copied().collect())
                         .unwrap_or_default();
                     dispatches
@@ -851,9 +851,9 @@ impl KinferenceService {
             if inflight_enabled {
                 inflight.inc(&chosen.endpoint);
             }
-            let chosen_hashes_u64 = score_side
-                .hashes_by_block_size
-                .get(&chosen.block_size)
+            let chosen_hashes_u64 = chosen
+                .block_size
+                .and_then(|b| score_side.hashes_by_block_size.get(&b))
                 .cloned()
                 .unwrap_or_default();
             let chosen_hashes_set: std::collections::HashSet<u64> =

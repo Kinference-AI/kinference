@@ -14,7 +14,7 @@ fn synthetic_record() -> PendingObservation {
         queue_swapped: 0,
         kv_cache_usage: 0.23,
         completion_rate_per_sec: 2.5,
-        block_size: 16,
+        block_size: Some(16),
     };
     let predictor_cfg = PredictorConfig::default();
     let picker_cfg = PickerConfig::default();

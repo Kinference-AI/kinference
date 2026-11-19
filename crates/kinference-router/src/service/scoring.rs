@@ -82,7 +82,7 @@ impl Scoring {
         let mut scores = Vec::with_capacity(workers.len());
         for (num, entry) in workers {
             let sample = self.scrape.latest(*num);
-            scores.push(worker_score(entry, &sample, entry.block_size, 0, 0));
+            scores.push(worker_score(entry, &sample, entry.block_size(), 0, 0));
         }
         ScoreResponse { scores }
     }
@@ -189,16 +189,29 @@ impl Scoring {
         // So callers scoring the same model in other pools needn't re-tokenize.
         side.tokens = tokens.clone();
 
-        // 3. Group workers by block_size, score each group separately.
+        // 3. Group workers by block size and score each group separately.
+        //
+        //    A worker without a learned block size borrows the size that
+        //    most of its peers have. The worker then pays the full prefill
+        //    of the prompt, like a peer with nothing cached. The predictor's
+        //    coefficients are per block, so a worker set where no worker has
+        //    a block size still counts no blocks, and its prefill term is
+        //    zero. Prefill time in tokens would need no block size here;
+        //    see "Follow-up work" in
+        //    design/2026-11-13-kv-block-size-per-worker.md.
+        let borrowed = most_common_block_size(workers.iter().map(|(_, w)| w));
         let mut by_block: HashMap<u32, Vec<(u64, &WorkerEntry)>> = HashMap::new();
+        let mut out: HashMap<u64, WorkerScore> = HashMap::new();
         for w in &workers {
-            by_block
-                .entry(w.1.block_size)
-                .or_default()
-                .push((w.0, &w.1));
+            match w.1.block_size().or(borrowed) {
+                Some(block_size) => by_block.entry(block_size).or_default().push((w.0, &w.1)),
+                None => {
+                    let sample = self.scrape.latest(w.0);
+                    out.insert(w.0, worker_score(&w.1, &sample, None, 0, 0));
+                }
+            }
         }
 
-        let mut out: HashMap<u64, WorkerScore> = HashMap::new();
         for (block_size, group) in by_block {
             let hashes =
                 compute_block_hash_for_seq(&tokens, block_size, BlockHashOptions::default());
@@ -256,7 +269,7 @@ impl Scoring {
 
                 out.insert(
                     *num,
-                    worker_score(entry, &sample, block_size, kv_match, total_blocks),
+                    worker_score(entry, &sample, Some(block_size), kv_match, total_blocks),
                 );
             }
         }

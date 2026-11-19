@@ -14,7 +14,7 @@ fn score(endpoint: &str, queue_waiting: u32) -> WorkerScore {
         queue_running: 0,
         queue_swapped: 0,
         kv_cache_usage: 0.0,
-        block_size: 16,
+        block_size: Some(16),
         total_blocks: 4,
     }
 }
@@ -335,7 +335,12 @@ fn worker_score_maps_each_input_to_its_own_field() {
         model_name_hint: None,
         current_models: vec![],
         http_url: None,
-        block_size: 999, // must NOT be what lands in the score
+        // Must not be what lands in the score.
+        indexed_group: Some(kinference_fleet::workers::IndexedGroup {
+            group_idx: 0,
+            kind: None,
+            block_size: 999,
+        }),
         initial_sync_complete: true,
         kv_events_observed: true,
         score_addr: "10.0.0.7:8000".into(),
@@ -358,11 +363,11 @@ fn worker_score_maps_each_input_to_its_own_field() {
         ..Default::default()
     };
 
-    let s = worker_score(&entry, &sample, 16, 44, 55);
+    let s = worker_score(&entry, &sample, Some(16), 44, 55);
 
     assert_eq!(s.name, "w-7");
     assert_eq!(s.endpoint, "10.0.0.7:8000");
-    assert_eq!(s.block_size, 16, "block_size comes from the argument");
+    assert_eq!(s.block_size, Some(16), "block_size comes from the argument");
     assert_eq!(s.matched_blocks, 44);
     assert_eq!(s.total_blocks, 55);
     assert_eq!(s.queue_waiting, 11);
@@ -370,6 +375,139 @@ fn worker_score_maps_each_input_to_its_own_field() {
     assert_eq!(s.queue_swapped, 33);
     assert!((s.completion_rate_per_sec - 1.5).abs() < f32::EPSILON);
     assert!((s.kv_cache_usage - 0.75).abs() < f32::EPSILON);
+}
+
+/// Store the first `n_blocks` blocks of `tokens`, cut at `block_size`, for
+/// `worker` in the pool's radix tree, as ingest does.
+async fn store_prefix(pool: &Pool, worker: u64, tokens: &[u32], block_size: u32, n_blocks: u64) {
+    use dynamo_kv_router::protocols::WorkerWithDpRank;
+    use dynamo_kv_router::zmq_wire::{BlockHashValue, RawKvEvent, convert_event};
+
+    let raw = RawKvEvent::BlockStored {
+        block_hashes: (0..n_blocks)
+            .map(|i| BlockHashValue::Unsigned(worker * 1000 + i))
+            .collect(),
+        parent_block_hash: None,
+        token_ids: tokens.to_vec(),
+        block_size: block_size as usize,
+        medium: None,
+        lora_name: None,
+        block_mm_infos: None,
+        is_eagle: None,
+        group_idx: None,
+        kv_cache_spec_kind: None,
+        kv_cache_spec_sliding_window: None,
+    };
+    let event = convert_event(
+        raw,
+        0,
+        block_size,
+        WorkerWithDpRank::new(worker, 0),
+        &Default::default(),
+    )
+    .and_then(|e| e.into_router_event())
+    .expect("a stored event");
+    pool.indexer.apply_event(event).await;
+    pool.registry.set_indexed_group(
+        worker,
+        kinference_fleet::workers::IndexedGroup {
+            group_idx: 0,
+            kind: None,
+            block_size,
+        },
+    );
+}
+
+/// Scoring predicts reuse for two workers of one worker set that publish
+/// different block sizes, each at the worker's own size. A worker without a
+/// block size counts the prompt's blocks at the size that most of its peers
+/// have, with none of them matched.
+#[tokio::test]
+async fn scoring_cuts_the_prompt_at_each_workers_block_size() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000", "10.0.0.2:8000"])
+        .build()
+        .await;
+    let pool = &t.pools[0];
+    let unlearned = WorkerEntry {
+        indexed_group: None,
+        ..crate::tokenizer::test_support::worker("qwen", "10.0.0.3:8000", true, None)
+    };
+    pool.registry.register(3, unlearned);
+
+    let tokens: Vec<u32> = (1..=128).collect();
+    store_prefix(pool, 1, &tokens, 16, 4).await;
+    store_prefix(pool, 2, &tokens, 64, 2).await;
+    pool.indexer.flush().await;
+
+    let (outcome, side) = t
+        .svc
+        .scoring
+        .score_workers(
+            &*t.svc.tokenizer,
+            pool,
+            "qwen",
+            ScoreInput::tokens(tokens),
+            HashMap::new(),
+        )
+        .await;
+    let ScoreOutcome::Ok(response) = outcome else {
+        panic!("scoring degraded");
+    };
+    let by_endpoint: HashMap<&str, &WorkerScore> = response
+        .scores
+        .iter()
+        .map(|s| (s.endpoint.as_str(), s))
+        .collect();
+    let blocks = |endpoint: &str| {
+        let s = by_endpoint[endpoint];
+        (s.block_size, s.matched_blocks, s.total_blocks)
+    };
+
+    assert_eq!(blocks("10.0.0.1:8000"), (Some(16), 4, 8));
+    assert_eq!(blocks("10.0.0.2:8000"), (Some(64), 2, 2));
+    // One peer has each size, so the smaller size wins.
+    assert_eq!(blocks("10.0.0.3:8000"), (Some(16), 0, 8));
+    assert_eq!(side.hashes_by_block_size[&16].len(), 8);
+    assert_eq!(side.hashes_by_block_size[&64].len(), 2);
+}
+
+/// In a worker set where no worker has a block size, scoring counts no
+/// blocks for any worker.
+#[tokio::test]
+async fn scoring_counts_no_blocks_when_no_worker_has_a_block_size() {
+    let t = ServiceBuilder::new().build().await;
+    let pool = kinference_fleet::pool::test_pool("cold-ws");
+    for (id, addr) in [(1, "10.0.0.1:8000"), (2, "10.0.0.2:8000")] {
+        let unlearned = WorkerEntry {
+            indexed_group: None,
+            ..crate::tokenizer::test_support::worker("qwen", addr, true, None)
+        };
+        pool.registry.register(id, unlearned);
+    }
+
+    let (outcome, side) = t
+        .svc
+        .scoring
+        .score_workers(
+            &*t.svc.tokenizer,
+            &pool,
+            "qwen",
+            ScoreInput::tokens((1..=128).collect()),
+            HashMap::new(),
+        )
+        .await;
+    let ScoreOutcome::Ok(response) = outcome else {
+        panic!("scoring degraded");
+    };
+    assert_eq!(response.scores.len(), 2);
+    for s in &response.scores {
+        assert_eq!(
+            (s.block_size, s.matched_blocks, s.total_blocks),
+            (None, 0, 0)
+        );
+    }
+    assert!(side.hashes_by_block_size.is_empty());
 }
 
 // --- policy_select, end to end ----------------------------------------------
@@ -394,7 +532,7 @@ fn primary(pool: &Arc<Pool>, model: &str, workers: &[(&str, u32)]) -> ScoredGrou
                 queue_running: 0,
                 queue_swapped: 0,
                 kv_cache_usage: 0.0,
-                block_size: 16,
+                block_size: Some(16),
                 total_blocks: 4,
             })
             .collect(),

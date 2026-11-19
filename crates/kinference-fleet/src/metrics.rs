@@ -137,10 +137,11 @@ impl FleetMetrics {
             registry,
             "kinference_kv_events_skipped_total",
             "KV-cache events that ingest skipped instead of indexing, by \
-             worker set and reason. block_size_mismatch means the event's \
-             block size differs from the worker set's kvBlockSize, so the \
-             router predicts no prefix reuse from that event. \
-             implausible_block_size means a block size that no engine uses \
+             worker set and reason. block_size_mismatch means an event of \
+             the worker's indexed group at a smaller block size than the \
+             worker's, such as a partial entry. unindexed_attention_group \
+             means an event of a main attention group that ingest doesn't \
+             index for the worker. implausible_block_size means a block size that no engine uses \
              for attention blocks. nothing_stored means a removal from a \
              worker that has no indexed block. unknown_kind and \
              unlearned_group_idx mean an event whose attention group \

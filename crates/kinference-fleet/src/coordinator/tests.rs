@@ -121,7 +121,7 @@ async fn declared_models_seed_the_worker_and_mark_it_ready() {
     let conflicted = pool_with_declared_models("b", &["mistral"]);
     conflicted
         .registry
-        .register(99, WorkerEntry::from_config(&worker(99, ""), 16));
+        .register(99, WorkerEntry::from_config(&worker(99, "")));
     assert_eq!(
         conflicted
             .registry
