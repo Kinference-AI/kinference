@@ -210,13 +210,12 @@ jq -c '.inflight_overlap_blocks | fromjson' observations.jsonl
   kubernetes.io/service-name=dummy-vllm` shows what discovery sees.
 - `/readyz` returns 503: policy is on and the CRD watch has not listed
   yet, usually because the CRDs chart is not installed.
-- `kinference_index_blocks` stays 0: the prompt was shorter than a block;
-  or `kvBlockSize` disagrees with the block size that the engine
-  publishes; or someone set `KINFERENCE_DISABLE_INGEST`. On a
-  disagreement, Kinference logs one WARN line with the engine's
-  `block_size`, and
-  `kinference_kv_events_skipped_total{reason="block_size_mismatch"}`
-  rises.
+- `kinference_index_blocks` stays 0: the prompt was shorter than a block,
+  or someone set `KINFERENCE_DISABLE_INGEST`. Kinference learns each
+  worker's block size from the worker's KV events and logs one INFO line
+  with the `block_size` when it does. Kinference ignores `kvBlockSize`.
+  `kinference_kv_events_skipped_total` counts the events that ingest
+  skips, by reason.
 
 ## A full request path
 

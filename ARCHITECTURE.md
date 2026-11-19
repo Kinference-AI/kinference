@@ -22,16 +22,18 @@ any move. To follow one request step by step, read
 
 - Worker: one vLLM engine process. It serves `/metrics` and `/v1/models`
   over HTTP and publishes KV-cache events over ZMQ.
-- Worker set: a group of workers with one block size and one profile. An
+- Worker set: a group of workers with one profile. An
   `InferenceWorkerSet` or the config declares a worker set, and both
-  resolve to a `PoolSpec`.
+  resolve to a `PoolSpec`. The workers of one worker set may have
+  different block sizes.
 - Pool: the runtime state of exactly one worker set: its radix tree, its
   worker registry, its in-flight bookkeeping and the lock that serializes
   commits. Kinference never merges pools, but one pick may score several.
 - Profile: the tuning that a pool uses: predictor coefficients, picker
   policy and the tokenize mode. The config names each profile, and worker
   sets reference a profile by that name.
-- Block: a fixed run of tokens, as long as the worker set's `kvBlockSize`.
+- Block: a fixed run of tokens, as long as the worker's block size.
+  Ingest learns each worker's block size from the worker's KV events.
   Engines publish cache events per block, so the block is the unit of
   prefix matching.
 - Index: the radix tree of blocks that each worker has cached. Kinference
