@@ -148,6 +148,11 @@ impl KinferenceService {
             if plan.is_empty() {
                 return Err(self.reject_unmatched(pref, model));
             }
+            let kept = local_upstreams(
+                plan.iter().flat_map(|(_, _, t)| t.iter()),
+                &resolved.destinations,
+            );
+            renders.abort_unless(&kept);
         }
         let any_rule_matched = plan.iter().any(|(rule, _, _)| rule.is_some());
 
@@ -425,7 +430,8 @@ impl KinferenceService {
         let pools = self.scoring.pools.snapshot();
         let mut renders = Renders::default();
         for (pool_id, upstream) in local_upstreams(targets.iter().copied(), destinations) {
-            if renders.pending.contains(&upstream) || scored.iter().any(|g| g.model == upstream) {
+            if renders.pending.contains_key(&upstream) || scored.iter().any(|g| g.model == upstream)
+            {
                 continue;
             }
             let Some(pool) = pools.get(pool_id).cloned() else {
@@ -450,10 +456,10 @@ impl KinferenceService {
                 (pool, model, outcome, side)
             };
             // The task keeps the pick's span, so its log lines name the pick.
-            renders
+            let handle = renders
                 .tasks
                 .spawn(task.instrument(tracing::Span::current()));
-            renders.pending.insert(upstream);
+            renders.pending.insert(upstream, handle);
         }
         renders
     }
@@ -586,21 +592,36 @@ type Rendered = (Arc<Pool>, String, ScoreOutcome, ScoreSideData);
 struct Renders {
     tasks: tokio::task::JoinSet<Rendered>,
     /// The models that have no render result yet.
-    pending: std::collections::HashSet<String>,
+    pending: HashMap<String, tokio::task::AbortHandle>,
 }
 
 impl Renders {
     /// Add the next render to finish to `scored`. False when none is left.
     async fn next(&mut self, scored: &mut Vec<ScoredGroup>, prom: &RouterMetrics) -> bool {
-        match self.tasks.join_next().await {
-            None => false,
-            Some(Ok((pool, model, outcome, side))) => {
-                self.pending.remove(&model);
-                scored.extend(ScoredGroup::from_outcome(pool, model, outcome, side, prom));
-                true
+        loop {
+            match self.tasks.join_next().await {
+                None => return false,
+                Some(Ok((pool, model, outcome, side))) => {
+                    self.pending.remove(&model);
+                    scored.extend(ScoredGroup::from_outcome(pool, model, outcome, side, prom));
+                    return true;
+                }
+                // A task that `abort_unless` stopped.
+                Some(Err(e)) if e.is_cancelled() => {}
+                Some(Err(e)) => std::panic::resume_unwind(e.into_panic()),
             }
-            Some(Err(e)) => std::panic::resume_unwind(e.into_panic()),
         }
+    }
+
+    /// Abort the render of every model that is not in `needed`.
+    fn abort_unless(&mut self, needed: &[(kinference_policy::PoolId, String)]) {
+        self.pending.retain(|model, task| {
+            let keep = needed.iter().any(|(_, m)| m == model);
+            if !keep {
+                task.abort();
+            }
+            keep
+        });
     }
 
     /// Wait until no model in `needed` is still rendering.
@@ -610,7 +631,7 @@ impl Renders {
         scored: &mut Vec<ScoredGroup>,
         prom: &RouterMetrics,
     ) {
-        while needed.iter().any(|(_, m)| self.pending.contains(m)) {
+        while needed.iter().any(|(_, m)| self.pending.contains_key(m)) {
             if !self.next(scored, prom).await {
                 break;
             }

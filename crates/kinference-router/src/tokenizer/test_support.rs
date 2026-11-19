@@ -25,6 +25,9 @@ pub(crate) enum Render {
     /// The answer for the model that the body names: these ids, or a 500
     /// for `None` or an unlisted model.
     PerModel(std::collections::BTreeMap<String, Option<Vec<u32>>>),
+    /// The answer for the model that the body names, after its delay: these
+    /// ids, or a 500 for `None` or an unlisted model.
+    Scripted(std::collections::BTreeMap<String, (Duration, Option<Vec<u32>>)>),
     /// As `Tokens`, but a body that names `model` waits `delay` first.
     SlowFor {
         model: String,
@@ -93,6 +96,19 @@ impl FakeRender {
                                 tokio::time::sleep(delay).await;
                             }
                             axum::Json(serde_json::json!({ "token_ids": ids })).into_response()
+                        }
+                        Render::Scripted(answers) => {
+                            let (delay, ids) =
+                                answers.get(&model_in(&body)).cloned().unwrap_or_default();
+                            tokio::time::sleep(delay).await;
+                            match ids {
+                                Some(ids) => axum::Json(serde_json::json!({ "token_ids": ids }))
+                                    .into_response(),
+                                None => {
+                                    (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "render down")
+                                        .into_response()
+                                }
+                            }
                         }
                         Render::PerModel(answers) => {
                             match answers.get(&model_in(&body)).cloned().flatten() {

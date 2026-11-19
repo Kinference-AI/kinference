@@ -1488,6 +1488,87 @@ async fn a_failed_render_scores_that_model_on_load_alone() {
     );
 }
 
+/// Once the token count rules a rule out, the router stops rendering the
+/// models that only that rule uses. `glm-up` belongs to the rule `long`
+/// alone, and its first render attempt fails after 300ms. The pick lasts
+/// 1s, so a render that the router had not stopped would try the second
+/// worker of `glm-ws`.
+#[tokio::test]
+async fn a_dropped_rules_models_stop_rendering() {
+    let ms = Duration::from_millis;
+    let ids: Vec<u32> = (1..=8).collect();
+    let render = Render::Scripted(
+        [
+            ("glm-up".to_string(), (ms(300), None)),
+            ("qwen-up".to_string(), (ms(0), Some(ids.clone()))),
+            ("llama-up".to_string(), (ms(1000), Some(ids))),
+        ]
+        .into(),
+    );
+    let policy = serde_json::json!({"rules": [
+        {"name": "long", "matches": [{"inputTokens": {"greaterThan": 20}}],
+         "route": {"consider": [{"models": {"names": ["glm-up"]}}],
+                   "select": [{"minimize": "PredictedTTFT"}]}},
+        {"name": "short",
+         "route": {"consider": [{"models": {"names": ["qwen-up", "llama-up"]}}],
+                   "select": [{"minimize": "PredictedTTFT"}]}}
+    ]});
+    let mut b = ServiceBuilder::new().render(render);
+    for (set, upstream, addrs) in [
+        ("glm-ws", "glm-up", &["10.0.0.1:8000", "10.0.0.2:8000"][..]),
+        ("qwen-ws", "qwen-up", &["10.0.0.3:8000"][..]),
+        ("llama-ws", "llama-up", &["10.0.0.4:8000"][..]),
+    ] {
+        b = b
+            .pool(set, upstream, addrs)
+            .alias(set, upstream, &["coding"]);
+    }
+    let t = b.policy(policy).build().await;
+
+    let out = t
+        .pick(CODING, 1, Qos::Interactive, Some(&TestService::pool_ref()))
+        .await;
+    assert!(matches!(out, PickAndRecordOutcome::Ok { .. }), "{out:?}");
+    let rendered = rendered_models(&t);
+    assert!(rendered.contains(&"llama-up".to_string()), "{rendered:?}");
+    assert!(
+        rendered.iter().filter(|m| *m == "glm-up").count() <= 1,
+        "no second attempt for a dropped rule: {rendered:?}"
+    );
+}
+
+/// A model that both a dropped rule and a kept rule use keeps rendering:
+/// the count from `glm-up` rules out `long`, and `short` then waits for the
+/// one `qwen-up` render that the pick started.
+#[tokio::test]
+async fn a_kept_rules_model_keeps_rendering_when_another_rule_drops() {
+    let ms = Duration::from_millis;
+    let ids: Vec<u32> = (1..=8).collect();
+    let render = Render::Scripted(
+        [
+            ("glm-up".to_string(), (ms(0), Some(ids.clone()))),
+            ("qwen-up".to_string(), (ms(100), Some(ids))),
+        ]
+        .into(),
+    );
+    let policy = serde_json::json!({"rules": [
+        {"name": "long", "matches": [{"inputTokens": {"greaterThan": 20}}],
+         "route": {"consider": [{"models": {"names": ["glm-up", "qwen-up"]}}],
+                   "select": [{"minimize": "PredictedTTFT"}]}},
+        {"name": "short",
+         "route": {"consider": [{"models": {"names": ["qwen-up"]}}],
+                   "select": [{"minimize": "PredictedTTFT"}]}}
+    ]});
+    let t = coding_fleet(render, policy).await;
+
+    let out = t
+        .pick(CODING, 1, Qos::Interactive, Some(&TestService::pool_ref()))
+        .await;
+    assert!(matches!(out, PickAndRecordOutcome::Ok { .. }), "{out:?}");
+    assert!(routed_locally_to(&t, "qwen-ws"));
+    assert_eq!(rendered_models(&t), ["glm-up", "qwen-up"]);
+}
+
 /// The router never checks a provider's declared context window.
 #[tokio::test]
 async fn a_provider_is_chosen_whatever_its_context_window() {
