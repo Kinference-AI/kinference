@@ -22,6 +22,8 @@ pub(crate) enum Render {
     Delayed(Vec<u32>, Duration),
     /// Every request gets a 500.
     Failing,
+    /// The first `n` requests get a 500, and every later one these ids.
+    FailingFirst(usize, Vec<u32>),
     /// The answer for the model that the body names: these ids, or a 500
     /// for `None` or an unlisted model.
     PerModel(std::collections::BTreeMap<String, Option<Vec<u32>>>),
@@ -69,6 +71,7 @@ impl FakeRender {
         // Any path: a worker is POSTed `{http_url}/v1/chat/completions/render`.
         let app =
             axum::Router::new().fallback(move |uri: axum::http::Uri, body: axum::body::Bytes| {
+                let earlier = seen.lock().expect("requests").len();
                 seen.lock().expect("requests").push(Seen {
                     path: uri.path().to_string(),
                     body: body.to_vec(),
@@ -90,6 +93,13 @@ impl FakeRender {
                         Render::Failing => {
                             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "render down")
                                 .into_response()
+                        }
+                        Render::FailingFirst(n, _) if earlier < n => {
+                            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "render down")
+                                .into_response()
+                        }
+                        Render::FailingFirst(_, ids) => {
+                            axum::Json(serde_json::json!({ "token_ids": ids })).into_response()
                         }
                         Render::SlowFor { model, delay, ids } => {
                             if model_in(&body) == model {

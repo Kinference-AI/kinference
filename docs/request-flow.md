@@ -110,9 +110,11 @@ a method whose typed result the next step consumes.
    hashes the tokens into blocks and matches the blocks against the pool's
    radix tree, which gives the cached-prefix overlap for each worker. The
    last scrape sample gives each worker's load. A render tries up to three
-   workers. If all of them fail, scoring falls back to load alone rather
-   than failing the pick. The service scores any further pools that serve
-   the model with the same tokens, or on load alone after a failed render.
+   workers. If all of them fail, the service renders the model on the next
+   pool that serves it, and on no pool after that one. If that render fails
+   too, scoring falls back to load alone rather than failing the pick. The
+   service scores every other pool that serves the model with the same
+   tokens, or on load alone when no render succeeded.
 4. Select. With no `InferencePool` named, or with policy disabled,
    `best_group` ranks the scored pools, and the winner's group goes on to
    the commit. With a pool named, `service::policy_driver::policy_select`
@@ -124,12 +126,14 @@ a method whose typed result the next step consumes.
    without falling through. The policy then waits only for the renders
    that it needs. When a rule tests `inputTokens`, the count comes from
    the first render to finish. Each rule waits for its own models when the
-   policy reaches that rule. Each render runs as its own task. The policy
-   cancels a render as soon as the token count rules out every rule that
-   uses its model, and it cancels the rest when the pick returns. The
-   policy flattens the candidates per endpoint, fits each local candidate
-   against its endpoint's context window using that model's own token
-   count, applies the exclusions, and ranks the rest. A
+   policy reaches that rule. When a model's render fails, the policy
+   renders that model on the next pool that serves it, alongside the other
+   models' renders. Each render runs as its own task. The policy cancels a
+   render as soon as the token count rules out every rule that uses its
+   model, and it cancels the rest when the pick returns. The policy
+   flattens the candidates per endpoint, fits each local candidate against
+   its endpoint's context window using that model's own token count,
+   applies the exclusions, and ranks the rest. A
    candidate whose render failed is taken to fit, and the fit never
    applies to a provider. Ranking holds no pool lock, because
    candidates may span pools, so the ranking's input may miss one

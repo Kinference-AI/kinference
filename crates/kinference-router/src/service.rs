@@ -137,6 +137,11 @@ impl ScoredGroup {
     }
 }
 
+/// How many more worker sets a pick asks to render a model after the first
+/// worker set's render failed. Each render can take the tokenizer's whole
+/// deadline, and a body that every engine refuses fails on all of them.
+pub(crate) const MAX_RENDER_FALLBACKS: usize = 1;
+
 /// What the policy chose.
 ///
 /// A provider win has no group (no pool, scores or prefix hashes), hence an

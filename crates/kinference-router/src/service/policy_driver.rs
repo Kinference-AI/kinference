@@ -416,10 +416,12 @@ impl KinferenceService {
     /// Start one render task for each upstream model that `targets` reach on
     /// a local destination and that no group in `scored` has.
     ///
-    /// Token ids belong to a model, so each such model costs one render call.
-    /// Each model renders on the first destination with a ready worker for
-    /// it. The candidate loop scores any other pool that serves the same
-    /// model from those tokens, or on load alone when the render failed.
+    /// Token ids belong to a model, so each such model costs one render call
+    /// unless that call fails. Each model renders on the first destination
+    /// with a ready worker for it. If that render fails, the task renders on
+    /// the next such destinations, up to `MAX_RENDER_FALLBACKS` of them. The
+    /// candidate loop scores any other pool that serves the same model from
+    /// those tokens, or on load alone when no render succeeded.
     fn start_renders(
         &self,
         targets: &[&kinference_policy::engine::ScoreTarget],
@@ -428,9 +430,12 @@ impl KinferenceService {
         spare: &ScoreInput,
     ) -> Renders {
         let pools = self.scoring.pools.snapshot();
-        let mut renders = Renders::default();
+        // Per model, the pools to render on, in order.
+        let mut by_model: Vec<(String, Vec<Arc<Pool>>)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for (pool_id, upstream) in local_upstreams(targets.iter().copied(), destinations) {
-            if renders.pending.contains_key(&upstream) || scored.iter().any(|g| g.model == upstream)
+            if scored.iter().any(|g| g.model == upstream)
+                || !seen.insert((pool_id, upstream.clone()))
             {
                 continue;
             }
@@ -445,21 +450,47 @@ impl KinferenceService {
             if !ready {
                 continue;
             }
+            match by_model.iter_mut().find(|(m, _)| *m == upstream) {
+                Some((_, on)) if on.len() <= MAX_RENDER_FALLBACKS => on.push(pool),
+                Some(_) => {}
+                None => by_model.push((upstream, vec![pool])),
+            }
+        }
+
+        let mut renders = Renders::default();
+        for (model, on) in by_model {
             let scoring = self.scoring.clone();
             let tokenizer = self.tokenizer.clone();
-            let input = spare.clone();
-            let model = upstream.clone();
+            let mut input = Some(spare.clone());
+            let task_model = model.clone();
             let task = async move {
-                let (outcome, side) = scoring
-                    .score_workers(&*tokenizer, &pool, &model, input, HashMap::new())
-                    .await;
-                (pool, model, outcome, side)
+                let model = task_model;
+                let mut on = on.into_iter().peekable();
+                let mut last = None;
+                while let Some(pool) = on.next() {
+                    let this = if on.peek().is_some() {
+                        input.clone()
+                    } else {
+                        input.take()
+                    };
+                    let Some(this) = this else { break };
+                    let (outcome, side) = scoring
+                        .score_workers(&*tokenizer, &pool, &model, this, HashMap::new())
+                        .await;
+                    let failed =
+                        matches!(outcome, ScoreOutcome::Unavailable(_, Degraded::Tokenize));
+                    last = Some((pool, outcome, side));
+                    if !failed {
+                        break;
+                    }
+                }
+                last.map(|(pool, outcome, side)| (pool, model, outcome, side))
             };
             // The task keeps the pick's span, so its log lines name the pick.
             let handle = renders
                 .tasks
                 .spawn(task.instrument(tracing::Span::current()));
-            renders.pending.insert(upstream, handle);
+            renders.pending.insert(model, handle);
         }
         renders
     }
@@ -588,9 +619,12 @@ type Rendered = (Arc<Pool>, String, ScoreOutcome, ScoreSideData);
 /// Each task runs on the runtime, so a render advances whether or not the
 /// pick is waiting for it. Dropping the set aborts the tasks that the pick
 /// did not wait for.
+///
+/// A task reports the last pool that it rendered on. A pool whose render
+/// failed before that one has no group, and the candidate loop scores it.
 #[derive(Default)]
 struct Renders {
-    tasks: tokio::task::JoinSet<Rendered>,
+    tasks: tokio::task::JoinSet<Option<Rendered>>,
     /// The models that have no render result yet.
     pending: HashMap<String, tokio::task::AbortHandle>,
 }
@@ -601,9 +635,11 @@ impl Renders {
         loop {
             match self.tasks.join_next().await {
                 None => return false,
-                Some(Ok((pool, model, outcome, side))) => {
-                    self.pending.remove(&model);
-                    scored.extend(ScoredGroup::from_outcome(pool, model, outcome, side, prom));
+                Some(Ok(rendered)) => {
+                    if let Some((pool, model, outcome, side)) = rendered {
+                        self.pending.remove(&model);
+                        scored.extend(ScoredGroup::from_outcome(pool, model, outcome, side, prom));
+                    }
                     return true;
                 }
                 // A task that `abort_unless` stopped.

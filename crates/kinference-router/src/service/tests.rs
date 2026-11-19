@@ -1232,6 +1232,50 @@ async fn a_worker_still_syncing_is_not_picked() {
     assert_eq!(t.render_calls(), 0);
 }
 
+/// With no policy, when a model's render fails on one worker set, the
+/// router renders the model on the next worker set and scores both from
+/// those tokens.
+#[tokio::test]
+async fn without_a_policy_a_failed_render_falls_back_to_the_next_pool() {
+    let t = ServiceBuilder::new()
+        .render(Render::FailingFirst(1, (1..=32).collect()))
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .pool("qwen-ws-2", "qwen", &["10.0.0.2:8000"])
+        .build()
+        .await;
+    make_busy(&t, 2);
+
+    let out = t.pick(BODY, 1, Qos::Interactive, None).await;
+    let PickAndRecordOutcome::Ok { endpoint, .. } = &out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(endpoint, "10.0.0.1:8000");
+    assert_eq!(t.render_calls(), 2);
+    assert!(nonzero(&t.metrics(), "kinference_score_degraded_total").is_empty());
+}
+
+/// With no policy, a model whose render fails on two worker sets renders on
+/// no third one. Every worker set still competes on load alone.
+#[tokio::test]
+async fn without_a_policy_failed_renders_stop_after_one_fallback() {
+    let t = ServiceBuilder::new()
+        .render(Render::Failing)
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .pool("qwen-ws-2", "qwen", &["10.0.0.2:8000"])
+        .pool("qwen-ws-3", "qwen", &["10.0.0.3:8000"])
+        .build()
+        .await;
+    make_busy(&t, 1);
+    make_busy(&t, 2);
+
+    let out = t.pick(BODY, 1, Qos::Interactive, None).await;
+    let PickAndRecordOutcome::Degraded { endpoint, .. } = &out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(endpoint, "10.0.0.3:8000");
+    assert_eq!(t.render_calls(), 2);
+}
+
 /// Two worker sets serving one model: the pick goes to the one with the
 /// shorter predicted wait, tokenizing once for both.
 #[tokio::test]
@@ -1442,8 +1486,9 @@ async fn an_input_tokens_rule_matches_after_one_round_of_renders() {
     }
 }
 
-/// A model whose render fails costs at most three attempts and is never
-/// rendered again in the pick. Its pools still compete on load alone.
+/// A model whose render fails on its first pool renders on one more pool,
+/// and on no pool after that. The first pool costs at most three attempts.
+/// The model's pools still compete on load alone.
 #[tokio::test]
 async fn a_failed_render_scores_that_model_on_load_alone() {
     let render = Render::PerModel(
@@ -1468,12 +1513,14 @@ async fn a_failed_render_scores_that_model_on_load_alone() {
         .alias("glm-ws", "glm-up", &["coding"])
         .pool("glm-ws-2", "glm-up", &["10.0.0.5:8000"])
         .alias("glm-ws-2", "glm-up", &["coding"])
-        .pool("qwen-ws", "qwen-up", &["10.0.0.6:8000"])
+        .pool("glm-ws-3", "glm-up", &["10.0.0.6:8000"])
+        .alias("glm-ws-3", "glm-up", &["coding"])
+        .pool("qwen-ws", "qwen-up", &["10.0.0.7:8000"])
         .alias("qwen-ws", "qwen-up", &["coding"])
         .policy(serde_json::json!({"rules": []}))
         .build()
         .await;
-    make_busy(&t, 6);
+    make_busy(&t, 7);
 
     let out = t
         .pick(CODING, 1, Qos::Interactive, Some(&TestService::pool_ref()))
@@ -1484,8 +1531,70 @@ async fn a_failed_render_scores_that_model_on_load_alone() {
     assert_eq!(model, "glm-up", "the busy qwen-ws loses on load");
     assert_eq!(
         rendered_models(&t),
-        ["glm-up", "glm-up", "glm-up", "qwen-up"]
+        ["glm-up", "glm-up", "glm-up", "glm-up", "qwen-up"],
+        "three attempts on glm-ws, one on glm-ws-2, none on glm-ws-3"
     );
+}
+
+/// Under a policy, when a model's render fails on one pool, the router
+/// renders the model on the next pool, and scores both pools from those
+/// tokens.
+#[tokio::test]
+async fn a_failed_render_falls_back_to_the_models_next_pool() {
+    let t = ServiceBuilder::new()
+        .render(Render::FailingFirst(1, (1..=32).collect()))
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .pool("qwen-ws-2", "qwen", &["10.0.0.2:8000"])
+        .policy(serde_json::json!({"rules": []}))
+        .build()
+        .await;
+    // The pool whose render failed wins only if it has a group to offer.
+    make_busy(&t, 2);
+
+    let out = t
+        .pick(BODY, 1, Qos::Interactive, Some(&TestService::pool_ref()))
+        .await;
+    let PickAndRecordOutcome::Ok { endpoint, .. } = &out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(endpoint, "10.0.0.1:8000");
+    assert_eq!(t.render_calls(), 2);
+    assert!(nonzero(&t.metrics(), "kinference_score_degraded_total").is_empty());
+}
+
+/// A model's fallback render runs alongside the other models' renders:
+/// `glm-up` fails on `glm-ws` without a request, and its render on
+/// `glm-ws-2` overlaps the `qwen-up` render.
+#[tokio::test]
+async fn a_fallback_render_runs_alongside_the_other_models_renders() {
+    let t = ServiceBuilder::new()
+        .render(Render::Delayed(
+            (1..=32).collect(),
+            Duration::from_millis(50),
+        ))
+        .pool("glm-ws", "glm-up", &["10.0.0.1:8000"])
+        .alias("glm-ws", "glm-up", &["coding"])
+        .pool("glm-ws-2", "glm-up", &["10.0.0.2:8000"])
+        .alias("glm-ws-2", "glm-up", &["coding"])
+        .pool("qwen-ws", "qwen-up", &["10.0.0.3:8000"])
+        .alias("qwen-ws", "qwen-up", &["coding"])
+        .policy(serde_json::json!({"rules": []}))
+        .build()
+        .await;
+    // With no `http_url`, the render on `glm-ws` fails at once.
+    let glm_ws = &t.pools[0].registry;
+    assert!(glm_ws.unregister(1));
+    assert!(glm_ws.register(
+        1,
+        crate::tokenizer::test_support::worker("glm-up", "10.0.0.1:8000", true, None),
+    ));
+
+    let out = t
+        .pick(CODING, 1, Qos::Interactive, Some(&TestService::pool_ref()))
+        .await;
+    assert!(matches!(out, PickAndRecordOutcome::Ok { .. }), "{out:?}");
+    assert_eq!(rendered_models(&t), ["glm-up", "qwen-up"]);
+    assert_eq!(t.render_peak_concurrency(), 2);
 }
 
 /// Once the token count rules a rule out, the router stops rendering the

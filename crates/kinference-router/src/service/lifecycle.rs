@@ -327,7 +327,8 @@ impl KinferenceService {
         })
     }
 
-    /// Step 3. Score every pool that serves the model, rendering it once.
+    /// Step 3. Score every pool that serves the model, rendering it once, or
+    /// once more on the next pool when the first render fails.
     /// Records `score_degraded`. Never refuses: a pool with no ready worker
     /// yields no group, and a policy may still place the request.
     ///
@@ -366,10 +367,11 @@ impl KinferenceService {
         let spare = (snapshot.is_some() || serving.len() > 1).then(|| inputs.clone());
         let mut inputs = Some(inputs);
         // The model's tokens once a pool has rendered them, for the other
-        // pools. After a failed render, the rest score on load alone.
+        // pools. After a failed render, the next pools render instead, up to
+        // `MAX_RENDER_FALLBACKS` of them. The rest score on load alone.
         let mut tokens: Option<Vec<u32>> = None;
-        let mut render_failed = false;
-        let mut groups: Vec<ScoredGroup> = Vec::new();
+        let mut failed_renders = 0;
+        let mut outcomes: Vec<(&Arc<Pool>, ScoreOutcome, ScoreSideData)> = Vec::new();
         for pool in &serving {
             let (outcome, side) = if let Some(t) = &tokens {
                 self.scoring
@@ -381,7 +383,7 @@ impl KinferenceService {
                         HashMap::new(),
                     )
                     .await
-            } else if render_failed {
+            } else if failed_renders > MAX_RENDER_FALLBACKS {
                 (
                     self.scoring.score_load_only(pool, &model),
                     ScoreSideData::default(),
@@ -390,13 +392,36 @@ impl KinferenceService {
                 let Some(input) = inputs.take().or_else(|| spare.clone()) else {
                     break;
                 };
-                self.scoring
+                let (outcome, side) = self
+                    .scoring
                     .score_workers(&*self.tokenizer, pool, &model, input, HashMap::new())
-                    .await
+                    .await;
+                if matches!(outcome, ScoreOutcome::Unavailable(_, Degraded::Tokenize)) {
+                    failed_renders += 1;
+                }
+                (outcome, side)
             };
-            render_failed |= matches!(outcome, ScoreOutcome::Unavailable(_, Degraded::Tokenize));
             if !side.tokens.is_empty() {
                 tokens = Some(side.tokens.clone());
+            }
+            outcomes.push((pool, outcome, side));
+        }
+        let mut groups: Vec<ScoredGroup> = Vec::new();
+        for (pool, mut outcome, mut side) in outcomes {
+            // A pool whose render failed before another pool's succeeded.
+            if let Some(t) = &tokens
+                && matches!(outcome, ScoreOutcome::Unavailable(_, Degraded::Tokenize))
+            {
+                (outcome, side) = self
+                    .scoring
+                    .score_workers(
+                        &*self.tokenizer,
+                        pool,
+                        &model,
+                        ScoreInput::tokens(t.clone()),
+                        HashMap::new(),
+                    )
+                    .await;
             }
             groups.extend(ScoredGroup::from_outcome(
                 pool.clone(),
