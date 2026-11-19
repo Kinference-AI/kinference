@@ -148,18 +148,20 @@ impl KinferenceService {
             if plan.is_empty() {
                 return Err(self.reject_unmatched(pref, model));
             }
-            let kept = local_upstreams(
+            let kept = reached(
                 plan.iter().flat_map(|(_, _, t)| t.iter()),
                 &resolved.destinations,
             );
-            renders.abort_unless(&kept);
+            renders.abort_unless(&local_models(&kept));
         }
         let any_rule_matched = plan.iter().any(|(rule, _, _)| rule.is_some());
 
         for (rule, route, targets) in &plan {
             let rule_name = rule.map(|r| r.name.clone());
-            let needed = local_upstreams(targets.iter(), &resolved.destinations);
-            renders.wait_for(&needed, &mut scored, &self.prom).await;
+            let steps = reached(targets.iter(), &resolved.destinations);
+            renders
+                .wait_for(&local_models(&steps), &mut scored, &self.prom)
+                .await;
             let mut candidates: Vec<engine::Candidate> = Vec::new();
             // For each (destination, upstream), the indices of the candidates
             // that the loop has built so far. Two targets can lead to the same
@@ -168,118 +170,105 @@ impl KinferenceService {
             // `tieBreak: Random` toward that destination.
             let mut built: HashMap<(CandidateDest, String), Vec<usize>> = HashMap::new();
 
-            for target in targets {
-                for dest in &resolved.destinations {
-                    if !target
-                        .backends
-                        .matches(dest.backend_type(), dest.name(), dest.labels())
-                    {
+            for step in steps {
+                // Providers need no scoring; candidates come from the
+                // declared model table.
+                let (target, dest, upstream) = match step {
+                    Reached::Local(target, dest, upstream) => (target, dest, upstream),
+                    Reached::Provider(target, prov) => {
+                        let dest =
+                            CandidateDest::Provider(prov.namespace.clone(), prov.name.clone());
+                        for c in provider_candidates_for(
+                            &self.observations.provider_health,
+                            prov,
+                            &target.model,
+                        ) {
+                            let key = (dest.clone(), c.upstream_model.clone());
+                            if !add_name(&mut candidates, &built, &key, &target.model) {
+                                built.insert(key, vec![candidates.len()]);
+                                candidates.push(c);
+                            }
+                        }
                         continue;
                     }
-                    // Providers need no scoring; candidates come from the
-                    // declared model table.
-                    let dest = match dest {
-                        kinference_policy::resolve::ResolvedDestination::Local(local) => local,
-                        kinference_policy::resolve::ResolvedDestination::Provider(prov) => {
-                            let dest =
-                                CandidateDest::Provider(prov.namespace.clone(), prov.name.clone());
-                            for c in provider_candidates_for(
-                                &self.observations.provider_health,
-                                prov,
-                                &target.model,
-                            ) {
-                                let key = (dest.clone(), c.upstream_model.clone());
-                                if !add_name(&mut candidates, &built, &key, &target.model) {
-                                    built.insert(key, vec![candidates.len()]);
-                                    candidates.push(c);
-                                }
-                            }
+                };
+                let key = (CandidateDest::Local(dest.pool_id), upstream.clone());
+                if add_name(&mut candidates, &built, &key, &target.model) {
+                    continue;
+                }
+                let idx = match scored
+                    .iter()
+                    .position(|g| g.pool.id == dest.pool_id && g.model == upstream)
+                {
+                    Some(i) => i,
+                    None => {
+                        let Some(pool) = self.scoring.pools.snapshot().get(dest.pool_id).cloned()
+                        else {
                             continue;
-                        }
-                    };
-                    // A canonical name can map to several upstream models, each
-                    // its own candidate.
-                    for upstream in dest.upstreams_for(&target.model) {
-                        let key = (CandidateDest::Local(dest.pool_id), upstream.clone());
-                        if add_name(&mut candidates, &built, &key, &target.model) {
+                        };
+                        let Some(spare) = spare.as_ref() else {
+                            // Only reachable if scoring inputs were not
+                            // cloned, which cannot happen when a policy
+                            // is active.
                             continue;
-                        }
-                        let idx = match scored
+                        };
+                        // Another pool of a model that this pick
+                        // already rendered: reuse its tokens, or after
+                        // a failed render, score on load alone.
+                        let cached = scored
                             .iter()
-                            .position(|g| g.pool.id == dest.pool_id && g.model == upstream)
-                        {
-                            Some(i) => i,
+                            .find(|g| g.model == upstream && g.input_tokens.is_some())
+                            .map(|g| g.side.tokens.clone());
+                        let failed = scored
+                            .iter()
+                            .any(|g| g.model == upstream && g.render_failed());
+                        let (outcome, side) = match cached {
+                            Some(t) => {
+                                self.scoring
+                                    .score_workers(
+                                        &*self.tokenizer,
+                                        &pool,
+                                        &upstream,
+                                        ScoreInput::tokens(t),
+                                        HashMap::new(),
+                                    )
+                                    .await
+                            }
+                            None if failed => (
+                                self.scoring.score_load_only(&pool, &upstream),
+                                ScoreSideData::default(),
+                            ),
                             None => {
-                                let Some(pool) =
-                                    self.scoring.pools.snapshot().get(dest.pool_id).cloned()
-                                else {
-                                    continue;
-                                };
-                                let Some(spare) = spare.as_ref() else {
-                                    // Only reachable if scoring inputs were not
-                                    // cloned, which cannot happen when a policy
-                                    // is active.
-                                    continue;
-                                };
-                                // Another pool of a model that this pick
-                                // already rendered: reuse its tokens, or after
-                                // a failed render, score on load alone.
-                                let cached = scored
-                                    .iter()
-                                    .find(|g| g.model == upstream && g.input_tokens.is_some())
-                                    .map(|g| g.side.tokens.clone());
-                                let failed = scored
-                                    .iter()
-                                    .any(|g| g.model == upstream && g.render_failed());
-                                let (outcome, side) = match cached {
-                                    Some(t) => {
-                                        self.scoring
-                                            .score_workers(
-                                                &*self.tokenizer,
-                                                &pool,
-                                                &upstream,
-                                                ScoreInput::tokens(t),
-                                                HashMap::new(),
-                                            )
-                                            .await
-                                    }
-                                    None if failed => (
-                                        self.scoring.score_load_only(&pool, &upstream),
-                                        ScoreSideData::default(),
-                                    ),
-                                    None => {
-                                        self.scoring
-                                            .score_workers(
-                                                &*self.tokenizer,
-                                                &pool,
-                                                &upstream,
-                                                spare.clone(),
-                                                HashMap::new(),
-                                            )
-                                            .await
-                                    }
-                                };
-                                let Some(group) = ScoredGroup::from_outcome(
-                                    pool,
-                                    upstream.clone(),
-                                    outcome,
-                                    side,
-                                    &self.prom,
-                                ) else {
-                                    continue;
-                                };
-                                scored.push(group);
-                                scored.len() - 1
+                                self.scoring
+                                    .score_workers(
+                                        &*self.tokenizer,
+                                        &pool,
+                                        &upstream,
+                                        spare.clone(),
+                                        HashMap::new(),
+                                    )
+                                    .await
                             }
                         };
-                        let new = self.candidates_for(&scored[idx], idx, dest, &target.model);
-                        built.insert(
-                            key,
-                            (candidates.len()..candidates.len() + new.len()).collect(),
-                        );
-                        candidates.extend(new);
+                        let Some(group) = ScoredGroup::from_outcome(
+                            pool,
+                            upstream.clone(),
+                            outcome,
+                            side,
+                            &self.prom,
+                        ) else {
+                            continue;
+                        };
+                        scored.push(group);
+                        scored.len() - 1
                     }
-                }
+                };
+                let new = self.candidates_for(&scored[idx], idx, dest, &target.model);
+                built.insert(
+                    key,
+                    (candidates.len()..candidates.len() + new.len()).collect(),
+                );
+                candidates.extend(new);
             }
 
             // Log the cross-group ranking, which the per-group score table
@@ -433,7 +422,11 @@ impl KinferenceService {
         // Per model, the pools to render on, in order.
         let mut by_model: Vec<(String, Vec<Arc<Pool>>)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for (pool_id, upstream) in local_upstreams(targets.iter().copied(), destinations) {
+        for step in reached(targets.iter().copied(), destinations) {
+            let Reached::Local(_, dest, upstream) = step else {
+                continue;
+            };
+            let pool_id = dest.pool_id;
             if scored.iter().any(|g| g.model == upstream)
                 || !seen.insert((pool_id, upstream.clone()))
             {
@@ -650,9 +643,9 @@ impl Renders {
     }
 
     /// Abort the render of every model that is not in `needed`.
-    fn abort_unless(&mut self, needed: &[(kinference_policy::PoolId, String)]) {
+    fn abort_unless(&mut self, needed: &std::collections::HashSet<&str>) {
         self.pending.retain(|model, task| {
-            let keep = needed.iter().any(|(_, m)| m == model);
+            let keep = needed.contains(model.as_str());
             if !keep {
                 task.abort();
             }
@@ -663,11 +656,11 @@ impl Renders {
     /// Wait until no model in `needed` is still rendering.
     async fn wait_for(
         &mut self,
-        needed: &[(kinference_policy::PoolId, String)],
+        needed: &std::collections::HashSet<&str>,
         scored: &mut Vec<ScoredGroup>,
         prom: &RouterMetrics,
     ) {
-        while needed.iter().any(|(_, m)| self.pending.contains_key(m)) {
+        while needed.iter().any(|m| self.pending.contains_key(*m)) {
             if !self.next(scored, prom).await {
                 break;
             }
@@ -692,12 +685,29 @@ impl Renders {
     }
 }
 
-/// Each `(pool, upstream model)` that `targets` reach on a local
-/// destination, in order.
-fn local_upstreams<'t>(
-    targets: impl Iterator<Item = &'t kinference_policy::engine::ScoreTarget>,
-    destinations: &[kinference_policy::resolve::ResolvedDestination],
-) -> Vec<(kinference_policy::PoolId, String)> {
+/// One destination that a route's target reaches.
+enum Reached<'a> {
+    /// A local worker set, once per upstream model that it serves under the
+    /// target's name. A canonical name can map to several upstream models.
+    Local(
+        &'a kinference_policy::engine::ScoreTarget,
+        &'a kinference_policy::resolve::ResolvedWorkerSet,
+        String,
+    ),
+    Provider(
+        &'a kinference_policy::engine::ScoreTarget,
+        &'a kinference_policy::resolve::ResolvedProvider,
+    ),
+}
+
+/// Every destination that `targets` reach, by target and then by
+/// destination. The renders and the candidate loop both follow this walk, so
+/// the router renders exactly the models that it builds candidates for.
+fn reached<'a>(
+    targets: impl Iterator<Item = &'a kinference_policy::engine::ScoreTarget>,
+    destinations: &'a [kinference_policy::resolve::ResolvedDestination],
+) -> Vec<Reached<'a>> {
+    use kinference_policy::resolve::ResolvedDestination;
     let mut out = Vec::new();
     for target in targets {
         for dest in destinations {
@@ -707,15 +717,28 @@ fn local_upstreams<'t>(
             {
                 continue;
             }
-            let kinference_policy::resolve::ResolvedDestination::Local(local) = dest else {
-                continue;
-            };
-            for upstream in local.upstreams_for(&target.model) {
-                out.push((local.pool_id, upstream));
+            match dest {
+                ResolvedDestination::Provider(prov) => out.push(Reached::Provider(target, prov)),
+                ResolvedDestination::Local(local) => {
+                    for upstream in local.upstreams_for(&target.model) {
+                        out.push(Reached::Local(target, local, upstream));
+                    }
+                }
             }
         }
     }
     out
+}
+
+/// The upstream models that `steps` reach on local worker sets.
+fn local_models<'s>(steps: &'s [Reached<'_>]) -> std::collections::HashSet<&'s str> {
+    steps
+        .iter()
+        .filter_map(|step| match step {
+            Reached::Local(_, _, upstream) => Some(upstream.as_str()),
+            Reached::Provider(..) => None,
+        })
+        .collect()
 }
 
 /// A destination that the router builds candidates for: a local worker set,
