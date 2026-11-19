@@ -972,6 +972,32 @@ async fn a_policy_rejection_leaves_no_state() {
     assert!(nonzero(&out, "kinference_routed_requests_total").is_empty());
 }
 
+/// `inputTokens` is the prompt's token count, not a multiple of a block size:
+/// a prompt of 40 tokens matches a rule for more than 32.
+#[tokio::test]
+async fn input_tokens_is_the_token_count_of_the_prompt() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .provider(
+            "cloud",
+            serde_json::json!([{"name": "vendor/qwen", "aliases": ["qwen"]}]),
+        )
+        .render(Render::Tokens((1..=40).collect()))
+        .policy(serde_json::json!({"rules": [{"name": "long-to-cloud",
+            "matches": [{"inputTokens": {"greaterThan": 32}}],
+            "route": {"consider": [{"type": "Provider"}], "select": [{"order": ["cloud"]}]}}]}))
+        .build()
+        .await;
+
+    let out = t
+        .pick(BODY, 1, Qos::Interactive, Some(&TestService::pool_ref()))
+        .await;
+    assert!(
+        matches!(out, PickAndRecordOutcome::Provider { .. }),
+        "{out:?}"
+    );
+}
+
 /// `auto` resolves to the one model the fleet serves, and the body is
 /// rewritten to name it.
 #[tokio::test]

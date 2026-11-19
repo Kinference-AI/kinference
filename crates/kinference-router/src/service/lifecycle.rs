@@ -478,14 +478,10 @@ impl KinferenceService {
                 names
             },
             requested_model,
-            // Block-granular, from scoring. `None` when nothing local was
-            // scored, so `inputTokens` predicates and context-window fitting
-            // don't apply.
-            input_tokens: winner.as_ref().and_then(|w| {
-                w.scores
-                    .first()
-                    .map(|s| (s.total_blocks as i64) * (w.pool.block_size as i64))
-            }),
+            // The prompt's token count, from scoring. `None` when nothing
+            // local was scored, so `inputTokens` predicates and context-window
+            // fitting don't apply.
+            input_tokens: winner.as_ref().map(|w| w.side.tokens.len() as i64),
             max_tokens: facts.max_tokens,
             qos: Some(req.qos.as_label().to_string()),
             tenant: req.identity.tenant.clone(),
