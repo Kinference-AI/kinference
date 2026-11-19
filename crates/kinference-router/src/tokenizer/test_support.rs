@@ -211,6 +211,7 @@ pub(crate) fn request<'a>(
         mode: TokenizeMode::Render,
         render_url: None,
         workers,
+        workerset: "test-ws",
         model,
         input,
         raw_body: None,

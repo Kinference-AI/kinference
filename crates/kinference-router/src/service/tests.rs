@@ -1251,7 +1251,13 @@ async fn without_a_policy_a_failed_render_falls_back_to_the_next_pool() {
     };
     assert_eq!(endpoint, "10.0.0.1:8000");
     assert_eq!(t.render_calls(), 2);
-    assert!(nonzero(&t.metrics(), "kinference_score_degraded_total").is_empty());
+    let metrics = t.metrics();
+    assert!(nonzero(&metrics, "kinference_score_degraded_total").is_empty());
+    assert!(
+        metrics.contains(r#"kinference_tokenize_failed_total{workerset="default/qwen-ws"} 1"#),
+        "the failed render is still counted: {:?}",
+        nonzero(&metrics, "kinference_tokenize_failed_total")
+    );
 }
 
 /// With no policy, a model whose render fails on two worker sets renders on
@@ -1559,7 +1565,13 @@ async fn a_failed_render_falls_back_to_the_models_next_pool() {
     };
     assert_eq!(endpoint, "10.0.0.1:8000");
     assert_eq!(t.render_calls(), 2);
-    assert!(nonzero(&t.metrics(), "kinference_score_degraded_total").is_empty());
+    let metrics = t.metrics();
+    assert!(nonzero(&metrics, "kinference_score_degraded_total").is_empty());
+    assert!(
+        metrics.contains(r#"kinference_tokenize_failed_total{workerset="default/qwen-ws"} 1"#),
+        "the failed render is still counted: {:?}",
+        nonzero(&metrics, "kinference_tokenize_failed_total")
+    );
 }
 
 /// A model's fallback render runs alongside the other models' renders:

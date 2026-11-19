@@ -164,6 +164,7 @@ impl Scoring {
                     mode: pool.tokenize_mode,
                     render_url: pool.tokenize_render_url.as_deref(),
                     workers: &workers,
+                    workerset: &pool.name,
                     model,
                     input: tok_input,
                     raw_body: raw_body.as_deref(),

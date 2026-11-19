@@ -279,6 +279,8 @@ pub struct RouterMetrics {
     prefix_match_ratio: HistogramVec,
     /// `kinference_prefix_overmatch_total{model,qos}`: picks where matched > requested.
     prefix_overmatch: IntCounterVec,
+    /// `kinference_tokenize_failed_total{workerset}`.
+    tokenize_failed: IntCounterVec,
     /// `kinference_score_degraded_total{reason}`.
     score_degraded: IntCounterVec,
     /// `kinference_policy_decisions_total{outcome}`.
@@ -596,6 +598,15 @@ impl RouterMetrics {
                  The ratio is clamped to 1.0; this counts how often that happened",
             &["model", "qos"],
         );
+        let tokenize_failed = int_counter_vec(
+            registry,
+            "kinference_tokenize_failed_total",
+            "Tokenize attempts that produced no tokens, by the worker set that \
+                 the router tokenized on. Counts a failure even when another \
+                 worker set's render then succeeded for the same pick, which \
+                 kinference_score_degraded_total does not",
+            &["workerset"],
+        );
         let score_degraded = int_counter_vec(
             registry,
             "kinference_score_degraded_total",
@@ -674,6 +685,7 @@ impl RouterMetrics {
             body_rejected,
             body_reaped,
             body_aborted,
+            tokenize_failed,
             score_degraded,
             policy_decisions,
             routed_requests,
@@ -755,6 +767,11 @@ impl RouterMetrics {
     /// `unavailable`. Exactly one per attempt.
     pub fn record_tokenize_path(&self, path: &str) {
         self.tokenize_path.with_label_values(&[path]).inc();
+    }
+
+    /// One tokenize attempt on `workerset` that produced no tokens.
+    pub fn record_tokenize_failed(&self, workerset: &str) {
+        self.tokenize_failed.with_label_values(&[workerset]).inc();
     }
 
     /// Tokenize latency, all paths.

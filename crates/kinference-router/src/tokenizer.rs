@@ -93,6 +93,8 @@ pub(crate) struct TokenizeRequest<'a> {
     /// A dedicated `/render` URL; `None` rotates across `workers`.
     pub render_url: Option<&'a str>,
     pub workers: &'a [(u64, WorkerEntry)],
+    /// The worker set's name, as the label of the failure counter.
+    pub workerset: &'a str,
     pub model: &'a str,
     pub input: TokenizeInput,
     /// The client's body, forwarded verbatim to `/render` when present;
@@ -145,6 +147,7 @@ impl Tokenizer for ByMode {
             if matches!(outcome, TokenizeOutcome::Unavailable { .. }) {
                 // Successful paths are counted where they succeed.
                 self.prom.record_tokenize_path("unavailable");
+                self.prom.record_tokenize_failed(req.workerset);
             }
             outcome
         })
