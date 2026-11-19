@@ -1,5 +1,5 @@
 ---
-status: draft
+status: accepted
 date: 2026-11-13
 author: Zahari Dichev
 issue: 86
