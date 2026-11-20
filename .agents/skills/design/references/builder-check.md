@@ -12,7 +12,7 @@ of the draft for each finding:
   rollback unstated;
 - where the Break-down leaves `main` unshippable between pull
   requests, or a line lacks its Done;
-- where a sentence breaks the prose rules in AGENTS.md.
+- where a sentence breaks the prose rules in docs/prose.md.
 
 Sort the findings into three groups. The first group holds findings
 that the draft already answers. For each of those findings, point the
