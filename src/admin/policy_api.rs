@@ -1049,16 +1049,16 @@ fn predict(
         .as_ref()
         .ok()
         .and_then(|(_, live)| candidate_block_size(live, o.endpoint.as_deref()));
-    // Ceiling division: a partial block still has to be prefilled. `validate`
-    // bounds the token count, so this can't overflow. A worker set without a
-    // learned block size counts no blocks, as scoring does.
+    // Full blocks only, as scoring counts them. A worker set without a
+    // learned block size counts no blocks. `validate` bounds the token
+    // count, so the casts can't overflow.
+    let tokens = input_tokens.unwrap_or(0).max(0);
     let blocks = found.as_ref().ok().map(|_| {
         let Some(bs) = block_size else {
             return (0, 0);
         };
         let bs = bs as i64;
-        let tokens = input_tokens.unwrap_or(0).max(0);
-        let total = ((tokens + bs - 1) / bs) as u32;
+        let total = (tokens / bs) as u32;
         (total, o.matched_blocks.unwrap_or(0).min(total))
     });
 
@@ -1089,6 +1089,7 @@ fn predict(
         kv_cache_usage: 0.0,
         block_size,
         total_blocks,
+        input_tokens: tokens as u32,
     };
     // No inflight summaries for a hypothetical request.
     let ms = picker::predicted_wait_ms(&score, &live.predictor, &[], Instant::now()).total_ms();

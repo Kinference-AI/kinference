@@ -77,13 +77,25 @@ impl Scoring {
         }
     }
 
-    /// Scores without a prefix-cache signal: load fields as usual,
-    /// `total_blocks` and `matched_blocks` zeroed.
-    pub(crate) fn load_only_response(&self, workers: &[(u64, WorkerEntry)]) -> ScoreResponse {
+    /// Scores without a prefix-cache signal: load fields as usual, the block
+    /// counts zeroed. With a nonzero `input_tokens`, every worker pays the
+    /// prefill of the whole prompt.
+    pub(crate) fn load_only_response(
+        &self,
+        workers: &[(u64, WorkerEntry)],
+        input_tokens: u32,
+    ) -> ScoreResponse {
         let mut scores = Vec::with_capacity(workers.len());
         for (num, entry) in workers {
             let sample = self.scrape.latest(*num);
-            scores.push(worker_score(entry, &sample, entry.block_size(), 0, 0));
+            scores.push(worker_score(
+                entry,
+                &sample,
+                entry.block_size(),
+                0,
+                0,
+                input_tokens,
+            ));
         }
         ScoreResponse { scores }
     }
@@ -120,7 +132,7 @@ impl Scoring {
         // A token-count request never reaches the model, so the prompt's
         // prefix has no cache to match.
         if api_call == ApiCall::MessagesCountTokens {
-            return (ScoreOutcome::Ok(self.load_only_response(&workers)), side);
+            return (ScoreOutcome::Ok(self.load_only_response(&workers, 0)), side);
         }
 
         let ScoreInput {
@@ -190,7 +202,7 @@ impl Scoring {
                                 "tokenize failed; picking on load alone"
                             );
                         }
-                        let degraded = self.load_only_response(&workers);
+                        let degraded = self.load_only_response(&workers, 0);
                         return (
                             ScoreOutcome::Unavailable(degraded, Degraded::Tokenize),
                             side,
@@ -205,22 +217,20 @@ impl Scoring {
         // 3. Group workers by block size and score each group separately.
         //
         //    A worker without a learned block size borrows the size that
-        //    most of its peers have. The worker then pays the full prefill
-        //    of the prompt, like a peer with nothing cached. The predictor's
-        //    coefficients are per block, so a worker set where no worker has
-        //    a block size still counts no blocks, and its prefill term is
-        //    zero. Prefill time in tokens would need no block size here;
-        //    see "Follow-up work" in
-        //    design/2026-11-13-kv-block-size-per-worker.md.
+        //    most of its peers have, and matches no block at that size. When
+        //    no worker has a block size, the workers count no blocks. The
+        //    predictor counts prefill in tokens, so either worker pays the
+        //    prefill of the whole prompt.
         let borrowed = most_common_block_size(workers.iter().map(|(_, w)| w));
         let mut by_block: HashMap<u32, Vec<(u64, &WorkerEntry)>> = HashMap::new();
         let mut out: HashMap<u64, WorkerScore> = HashMap::new();
+        let input_tokens = tokens.len().min(u32::MAX as usize) as u32;
         for w in &workers {
             match w.1.block_size().or(borrowed) {
                 Some(block_size) => by_block.entry(block_size).or_default().push((w.0, &w.1)),
                 None => {
                     let sample = self.scrape.latest(w.0);
-                    out.insert(w.0, worker_score(&w.1, &sample, None, 0, 0));
+                    out.insert(w.0, worker_score(&w.1, &sample, None, 0, 0, input_tokens));
                 }
             }
         }
@@ -260,7 +270,7 @@ impl Scoring {
                             "prefix index query failed; picking on load alone"
                         );
                     }
-                    let degraded = self.load_only_response(&workers);
+                    let degraded = self.load_only_response(&workers, input_tokens);
                     return (
                         ScoreOutcome::Unavailable(degraded, Degraded::PrefixIndex),
                         side,
@@ -282,7 +292,14 @@ impl Scoring {
 
                 out.insert(
                     *num,
-                    worker_score(entry, &sample, Some(block_size), kv_match, total_blocks),
+                    worker_score(
+                        entry,
+                        &sample,
+                        Some(block_size),
+                        kv_match,
+                        total_blocks,
+                        input_tokens,
+                    ),
                 );
             }
         }

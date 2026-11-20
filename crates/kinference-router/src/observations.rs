@@ -124,9 +124,9 @@ pub struct PendingObservation {
     /// `chosen_worker.matched_blocks` carries the layered value the
     /// picker scored on; this is the underlying snapshot.
     pub kv_blocks: u32,
-    /// Sum of `uncached_at_dispatch` across inflight dispatches on
+    /// Sum of `uncached_tokens` across inflight dispatches on
     /// the chosen worker at pick time.
-    pub inflight_workload_blocks: u32,
+    pub inflight_workload_tokens: u32,
     /// Constant-model queue cost (`q_rate × q_waiting`).
     pub q_ms_constant: f32,
     /// Workload-model queue cost (`Σ uncached × prefill_rate +
@@ -646,13 +646,16 @@ fn log_observation(
         overlap_blocks = w.matched_blocks,
         total_blocks = w.total_blocks,
         kv_blocks = record.kv_blocks,
+        input_tokens = w.input_tokens,
+        overlap_tokens = w.tokens_in(w.matched_blocks),
+        kv_tokens = w.tokens_in(record.kv_blocks),
         q_waiting = w.queue_waiting,
         q_inflight = record.q_inflight,
         q_running = w.queue_running,
         q_swapped = w.queue_swapped,
         kv_cache_usage = w.kv_cache_usage,
         compl_per_s = w.completion_rate_per_sec,
-        q_workload = record.inflight_workload_blocks,
+        q_workload_tokens = record.inflight_workload_tokens,
         q_ms_constant = record.q_ms_constant,
         q_ms_workload = record.q_ms_workload,
         inflight_dispatches = record.inflight_overlap_blocks.len(),
@@ -663,8 +666,8 @@ fn log_observation(
         cache_pressure_penalty_ms = pred.cache_pressure_penalty_ms,
         saturated_cold_ms_per_entry = pred.saturated_cold_ms_per_entry,
         cache_pressure_saturated_threshold = pred.cache_pressure_saturated_threshold,
-        attention_uncached_block_ms = pred.attention_uncached_block_ms,
-        attention_uncached_per_every_block_ms = pred.attention_uncached_per_every_block_ms,
+        attention_uncached_token_ms = pred.attention_uncached_token_ms,
+        attention_uncached_per_every_token_ms = pred.attention_uncached_per_every_token_ms,
         q_running_penalty_peak_ms = pred.q_running_penalty_peak_ms,
         q_running_penalty_peak_qr = pred.q_running_penalty_peak_qr,
         q_running_penalty_falloff_qr = pred.q_running_penalty_falloff_qr,

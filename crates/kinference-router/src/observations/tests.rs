@@ -15,6 +15,7 @@ fn synthetic_record() -> PendingObservation {
         kv_cache_usage: 0.23,
         completion_rate_per_sec: 2.5,
         block_size: Some(16),
+        input_tokens: 64,
     };
     let predictor_cfg = PredictorConfig::default();
     let picker_cfg = PickerConfig::default();
@@ -32,7 +33,7 @@ fn synthetic_record() -> PendingObservation {
         prediction,
         q_inflight: 3,
         kv_blocks: 2,
-        inflight_workload_blocks: 17,
+        inflight_workload_tokens: 17,
         q_ms_constant: 1000.0,
         q_ms_workload: 250.0,
         inflight_overlap_blocks: vec![5, 3],
@@ -119,6 +120,25 @@ fn finalize_emits_one_observation_event_with_named_fields() {
         PredictorConfig::default().queue_ms_per_entry
     );
     assert_eq!(e["top_k_min"], PickerConfig::default().top_k_min);
+}
+
+/// The event reports the prompt and both overlaps in tokens, next to the
+/// per-token coefficients.
+#[test]
+fn the_observation_event_counts_the_prompt_in_tokens() {
+    let e = &finalize_capturing(synthetic_record())[0];
+    assert_eq!(e["input_tokens"], 64);
+    assert_eq!(e["overlap_tokens"], 32, "2 blocks of 16 tokens");
+    assert_eq!(e["kv_tokens"], 32);
+    let p = PredictorConfig::default();
+    assert_eq!(
+        e["attention_uncached_token_ms"].as_f64().unwrap() as f32,
+        p.attention_uncached_token_ms
+    );
+    assert_eq!(
+        e["attention_uncached_per_every_token_ms"].as_f64().unwrap() as f32,
+        p.attention_uncached_per_every_token_ms
+    );
 }
 
 #[test]

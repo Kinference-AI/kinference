@@ -45,7 +45,8 @@ pub(crate) enum ScoreOutcome {
     NoWorkers,
     /// The prefix-cache signal was lost: `matched_blocks` and `total_blocks`
     /// are 0 on every entry, but the load fields are populated, so the picker
-    /// still runs, without the overlap signal.
+    /// still runs, without the overlap signal. `input_tokens` is 0 too when
+    /// tokenize failed.
     Unavailable(ScoreResponse, Degraded),
 }
 
@@ -549,6 +550,7 @@ fn worker_score(
     block_size: Option<u32>,
     matched_blocks: u32,
     total_blocks: u32,
+    input_tokens: u32,
 ) -> WorkerScore {
     WorkerScore {
         name: entry.worker_id_str.clone(),
@@ -561,6 +563,7 @@ fn worker_score(
         kv_cache_usage: sample.kv_cache_usage,
         block_size,
         total_blocks,
+        input_tokens,
     }
 }
 
