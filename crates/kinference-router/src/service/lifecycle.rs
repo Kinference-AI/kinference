@@ -676,8 +676,8 @@ impl KinferenceService {
                             }
                             let est = crate::picker::prefill_ms_for(
                                 predictor_cfg,
-                                d.uncached_at_dispatch,
-                                d.total_at_dispatch,
+                                d.uncached_tokens,
+                                d.input_tokens,
                             );
                             if est <= 0.0 {
                                 return 1.0;
@@ -818,7 +818,7 @@ impl KinferenceService {
                 prediction,
                 q_inflight: chosen_inflight,
                 kv_blocks: chosen_kv_blocks,
-                inflight_workload_blocks: chosen_q_breakdown.inflight_workload_blocks,
+                inflight_workload_tokens: chosen_q_breakdown.inflight_workload_tokens,
                 q_ms_constant: chosen_q_breakdown.q_ms_constant,
                 q_ms_workload: chosen_q_breakdown.q_ms_workload,
                 inflight_overlap_blocks: chosen_overlap_per_dispatch,
@@ -858,13 +858,12 @@ impl KinferenceService {
                 .unwrap_or_default();
             let chosen_hashes_set: std::collections::HashSet<u64> =
                 chosen_hashes_u64.into_iter().collect();
-            let chosen_uncached = chosen.total_blocks.saturating_sub(chosen.matched_blocks);
             pool.inflight_prefixes.insert(
                 req.request_id,
                 chosen.endpoint.clone(),
                 chosen_hashes_set,
-                chosen_uncached,
-                chosen.total_blocks,
+                chosen.uncached_tokens(),
+                chosen.input_tokens,
             );
 
             chosen_endpoint = chosen.endpoint.clone();

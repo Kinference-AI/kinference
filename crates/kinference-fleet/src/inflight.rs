@@ -75,17 +75,17 @@ impl InflightRegistry {
 /// One outstanding dispatch. `remaining` shrinks as `on_stored` calls
 /// arrive, and the dispatch is dropped once it empties.
 ///
-/// `uncached_at_dispatch` (blocks the engine had to prefill) is stored since
-/// the radix tree will have moved on by the time it's needed.
-/// `total_at_dispatch` is the full prompt's block count, for the quadratic
+/// `uncached_tokens` counts the tokens that the engine had to prefill. It is
+/// stored since the radix tree will have moved on by the time it's needed.
+/// `input_tokens` is the full prompt's token count, for the quadratic
 /// prefill cost model.
 #[derive(Debug, Clone)]
 struct InflightDispatch {
     endpoint: String,
     remaining: HashSet<u64>,
     dispatched_at: Instant,
-    uncached_at_dispatch: u32,
-    total_at_dispatch: u32,
+    uncached_tokens: u32,
+    input_tokens: u32,
 }
 
 /// One outstanding dispatch, without its hashes, for the picker's queue-cost
@@ -93,8 +93,8 @@ struct InflightDispatch {
 #[derive(Debug, Clone, Copy)]
 pub struct InflightSummary {
     pub dispatched_at: Instant,
-    pub uncached_at_dispatch: u32,
-    pub total_at_dispatch: u32,
+    pub uncached_tokens: u32,
+    pub input_tokens: u32,
 }
 
 /// Full per-dispatch snapshot, so prefix overlap and progress are computed
@@ -103,8 +103,8 @@ pub struct InflightSummary {
 pub struct DispatchSnapshot {
     pub remaining: HashSet<u64>,
     pub dispatched_at: Instant,
-    pub uncached_at_dispatch: u32,
-    pub total_at_dispatch: u32,
+    pub uncached_tokens: u32,
+    pub input_tokens: u32,
 }
 
 impl DispatchSnapshot {
@@ -112,8 +112,8 @@ impl DispatchSnapshot {
     pub fn summary(&self) -> InflightSummary {
         InflightSummary {
             dispatched_at: self.dispatched_at,
-            uncached_at_dispatch: self.uncached_at_dispatch,
-            total_at_dispatch: self.total_at_dispatch,
+            uncached_tokens: self.uncached_tokens,
+            input_tokens: self.input_tokens,
         }
     }
 }
@@ -150,8 +150,8 @@ impl InflightPrefixes {
             .map(|e| DispatchSnapshot {
                 remaining: e.value().remaining.clone(),
                 dispatched_at: e.value().dispatched_at,
-                uncached_at_dispatch: e.value().uncached_at_dispatch,
-                total_at_dispatch: e.value().total_at_dispatch,
+                uncached_tokens: e.value().uncached_tokens,
+                input_tokens: e.value().input_tokens,
             })
             .collect();
         matching.sort_by_key(|d| d.dispatched_at);
@@ -165,8 +165,8 @@ impl InflightPrefixes {
         request_id: u64,
         endpoint: String,
         hashes: HashSet<u64>,
-        uncached_at_dispatch: u32,
-        total_at_dispatch: u32,
+        uncached_tokens: u32,
+        input_tokens: u32,
     ) {
         self.dispatches.insert(
             request_id,
@@ -174,8 +174,8 @@ impl InflightPrefixes {
                 endpoint,
                 remaining: hashes,
                 dispatched_at: Instant::now(),
-                uncached_at_dispatch,
-                total_at_dispatch,
+                uncached_tokens,
+                input_tokens,
             },
         );
     }

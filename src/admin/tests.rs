@@ -780,8 +780,7 @@ async fn a_model_term_matches_any_sibling_alias_of_the_same_upstream_model() {
     assert_eq!(other["verdict"], "rejected_unmatched", "{other}");
 }
 
-/// Each candidate is predicted with its own worker set's model, since
-/// coefficients and block size differ per set.
+/// Each candidate gets its worker set's coefficients, at any block size.
 #[tokio::test]
 async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -811,14 +810,16 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
             "destinations": [
                 { "kind": "InferenceWorkerSet", "name": "big-blocks" },
                 { "kind": "InferenceWorkerSet", "name": "small-blocks" },
+                { "kind": "InferenceWorkerSet", "name": "no-blocks" },
+                { "kind": "InferenceWorkerSet", "name": "slow" },
             ],
         }))
         .expect("valid pool spec"),
         status: None,
     });
 
-    // Two live pools whose workers have different block sizes, so
-    // `total_blocks` and the prefill term differ for one prompt.
+    // Three live pools with the default coefficients, whose workers differ
+    // only in block size, and one pool with a larger `base_ms`.
     let big = pool("big-blocks");
     big.registry
         .register(1, entry_at("10.0.0.1:8000", Some(256)));
@@ -826,14 +827,30 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
     small
         .registry
         .register(2, entry_at("10.0.0.2:8000", Some(16)));
-    let (big_id, small_id) = (big.id, small.id);
+    let none = pool("no-blocks");
+    none.registry.register(4, entry_at("10.0.0.4:8000", None));
+    let mut slow_spec = kinference_fleet::pool::test_spec("slow");
+    slow_spec.predictor.base_ms += 1000.0;
+    let slow = Arc::new(kinference_fleet::pool::Pool::from_spec(
+        kinference_policy::PoolId::next(),
+        &slow_spec,
+        &tokio_util::sync::CancellationToken::new(),
+    ));
+    slow.registry
+        .register(5, entry_at("10.0.0.5:8000", Some(16)));
+    let ids = [
+        ("big-blocks", big.id),
+        ("small-blocks", small.id),
+        ("no-blocks", none.id),
+        ("slow", slow.id),
+    ];
     let pools = PoolRegistry::new();
     pools.publish(Arc::new(kinference_fleet::pool::PoolMap::from_pools(vec![
-        big, small,
+        big, small, none, slow,
     ])));
 
     let mut by_key = std::collections::BTreeMap::new();
-    for (name, id) in [("big-blocks", big_id), ("small-blocks", small_id)] {
+    for (name, id) in ids {
         by_key.insert(
             kinference_policy::PoolKey {
                 namespace: Some("default".into()),
@@ -853,7 +870,12 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
             .expect("valid policy spec"),
             status: None,
         })],
-        &[ws("big-blocks"), ws("small-blocks")],
+        &[
+            ws("big-blocks"),
+            ws("small-blocks"),
+            ws("no-blocks"),
+            ws("slow"),
+        ],
         &[],
         &[],
         &[],
@@ -874,6 +896,10 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
             // Belongs to no set.
             { "backendName": "invented", "backendType": "Local",
               "canonicalModel": "m", "endpoint": "10.0.0.3:8000", "queuedPrompts": 0 },
+            { "backendName": "no-blocks", "backendType": "Local",
+              "canonicalModel": "m", "endpoint": "10.0.0.4:8000", "queuedPrompts": 0 },
+            { "backendName": "slow", "backendType": "Local",
+              "canonicalModel": "m", "endpoint": "10.0.0.5:8000", "queuedPrompts": 0 },
         ]
     }))
     .unwrap();
@@ -888,10 +914,19 @@ async fn each_candidate_is_predicted_with_its_own_worker_sets_model() {
 
     let c = body["effectiveCandidates"].as_array().unwrap();
     let ttft = |i: usize| c[i]["predictedTtftMs"].as_f64().unwrap();
-    assert_ne!(
-        ttft(0),
-        ttft(1),
-        "two sets with different block sizes must not predict identically: {body}"
+    let p = kinference_fleet::profile::PredictorConfig::default();
+    let cold = p.base_ms
+        + p.attention_uncached_token_ms * 4096.0
+        + p.attention_uncached_per_every_token_ms * 4096.0 * 4096.0;
+    for i in [0, 1, 3] {
+        assert!(
+            (ttft(i) - cold as f64).abs() < 0.01,
+            "a cold prompt costs the same at every block size: {body}"
+        );
+    }
+    assert!(
+        (ttft(4) - ttft(1) - 1000.0).abs() < 0.01,
+        "a set is predicted with its own coefficients: {body}"
     );
     assert_eq!(c[0]["predictionSource"], "predictor");
     assert_eq!(c[1]["predictionSource"], "predictor");
