@@ -25,6 +25,23 @@ pub struct WorkerScore {
     /// when no worker of the pool has a block size.
     pub block_size: Option<u32>,
     pub total_blocks: u32,
+    /// The prompt's token count. Zero when tokenize failed.
+    pub input_tokens: u32,
+}
+
+impl WorkerScore {
+    /// The tokens of the prompt that `blocks` matched blocks cover. Zero for
+    /// a worker without a block size.
+    pub fn tokens_in(&self, blocks: u32) -> u32 {
+        blocks
+            .saturating_mul(self.block_size.unwrap_or(0))
+            .min(self.input_tokens)
+    }
+
+    /// The tokens of the prompt that the worker has to prefill.
+    pub fn uncached_tokens(&self) -> u32 {
+        self.input_tokens - self.tokens_in(self.matched_blocks)
+    }
 }
 
 /// Per-term breakdown of the predicted wait, in milliseconds. Kept
@@ -60,21 +77,23 @@ impl WaitPrediction {
 
 /// Quadratic prefill-time estimator:
 /// ```text
-/// prefill_ms = a × n_uncached + c × n_uncached × n_total
+/// prefill_ms = a × uncached_tokens + c × uncached_tokens × input_tokens
 /// ```
-/// where `a = predictor.attention_uncached_block_ms` (linear per-block
+/// where `a = predictor.attention_uncached_token_ms` (linear per-token
 /// setup cost: weight fetch, KV write, etc.) and
-/// `c = predictor.attention_uncached_per_every_block_ms` (attention
+/// `c = predictor.attention_uncached_per_every_token_ms` (attention
 /// cost: each uncached query attends to every token in the prompt,
 /// so scales with prompt length).
 ///
+/// Both counts are in tokens, so the estimate needs no block size.
+///
 /// Used for the new request's prefill in `predicted_wait_ms`, and for each
-/// inflight's (with its own `total_at_dispatch`) in `compute_queue_cost`.
+/// inflight's (with its own `input_tokens`) in `compute_queue_cost`.
 pub fn prefill_ms_for(predictor: &PredictorConfig, uncached: u32, total: u32) -> f32 {
     let u = uncached as f32;
     let t = total as f32;
-    predictor.attention_uncached_block_ms * u
-        + predictor.attention_uncached_per_every_block_ms * u * t
+    predictor.attention_uncached_token_ms * u
+        + predictor.attention_uncached_per_every_token_ms * u * t
 }
 
 /// Expected block overlap between our prompt and a worker's KV cache
@@ -176,7 +195,7 @@ pub fn scale_per_dispatch_by_progress(
 ///
 ///   base_ms              = constant per-request intercept
 ///   q_ms                 = time-progressed inflight cost + unknown-queue cost
-///   prefill_ms           = prefill_ms_for(uncached_blocks, total_blocks)
+///   prefill_ms           = prefill_ms_for(uncached_tokens, input_tokens)
 ///   cache_ms             = cache_pressure_penalty_ms * kv_cache_usage
 ///   q_running_ms         = q_running_penalty_ms(...)
 ///   decode_contention_ms = effective_qr * forward_pass_ms
@@ -185,7 +204,7 @@ pub fn scale_per_dispatch_by_progress(
 ///
 /// - Remaining-prefill inflight cost: each in-flight dispatch we have on the
 ///   worker contributes
-///   `(1 - progress) × prefill_ms_for(uncached_at_dispatch, total_at_dispatch)`,
+///   `(1 - progress) × prefill_ms_for(uncached_tokens, input_tokens)`,
 ///   with progress `elapsed / estimated_prefill` clamped to [0, 1]. Inflights
 ///   past position N (`inflight_concurrent_capacity`) haven't been admitted,
 ///   so contribute their full prefill cost.
@@ -198,8 +217,8 @@ pub fn scale_per_dispatch_by_progress(
 ///
 /// `now` is passed in so every worker is scored against the same instant.
 ///
-/// `total_blocks == 0` (metric unavailable, or prompt smaller than one
-/// block) treats uncached_blocks as 0 rather than producing NaN.
+/// A worker without a block size has no matched blocks, so the worker pays
+/// the prefill of the whole prompt.
 pub fn predicted_wait_ms(
     w: &WorkerScore,
     predictor: &PredictorConfig,
@@ -208,8 +227,7 @@ pub fn predicted_wait_ms(
 ) -> WaitPrediction {
     let q = compute_queue_cost(w, predictor, inflight_summaries, now);
 
-    let uncached_blocks = w.total_blocks.saturating_sub(w.matched_blocks);
-    let prefill_ms = prefill_ms_for(predictor, uncached_blocks, w.total_blocks);
+    let prefill_ms = prefill_ms_for(predictor, w.uncached_tokens(), w.input_tokens);
 
     let cache_ms = predictor.cache_pressure_penalty_ms * w.kv_cache_usage;
 
@@ -284,9 +302,9 @@ pub struct QueueCostBreakdown {
     pub q_ms_workload: f32,
     /// q_ms used by the predictor.
     pub q_ms: f32,
-    /// Total uncached blocks across our inflight dispatches, for the
+    /// Total uncached tokens across our inflight dispatches, for the
     /// observation event.
-    pub inflight_workload_blocks: u32,
+    pub inflight_workload_tokens: u32,
 }
 
 /// `(progress, discount)` for one inflight slot, where `discount` is the
@@ -333,9 +351,9 @@ pub fn compute_queue_cost(
     let q_ms_constant = q_rate_ms_per_entry * w.queue_waiting as f32;
 
     let inflight_count = inflight_summaries.len() as u32;
-    let inflight_workload_blocks: u32 = inflight_summaries
+    let inflight_workload_tokens: u32 = inflight_summaries
         .iter()
-        .map(|s| s.uncached_at_dispatch as u64)
+        .map(|s| s.uncached_tokens as u64)
         .sum::<u64>()
         .min(u32::MAX as u64) as u32;
     let unknown_q_count = w.queue_waiting.saturating_sub(inflight_count);
@@ -352,11 +370,8 @@ pub fn compute_queue_cost(
     for (idx, summary) in inflight_summaries.iter().enumerate() {
         let position = (idx as u32).saturating_add(1);
         // Uses the inflight's own prompt length, not ours.
-        let estimated_prefill_ms = prefill_ms_for(
-            predictor,
-            summary.uncached_at_dispatch,
-            summary.total_at_dispatch,
-        );
+        let estimated_prefill_ms =
+            prefill_ms_for(predictor, summary.uncached_tokens, summary.input_tokens);
         let elapsed_ms = now
             .checked_duration_since(summary.dispatched_at)
             .map(|d| d.as_millis() as f32)
@@ -375,7 +390,7 @@ pub fn compute_queue_cost(
         q_ms_constant,
         q_ms_workload,
         q_ms,
-        inflight_workload_blocks,
+        inflight_workload_tokens,
     }
 }
 
@@ -624,7 +639,7 @@ fn cache_replication_override(
 ///   comparison. At α=1 with no inflight overlap they're identical.
 /// - `q_wait` is the worker's scraped `queue_waiting`; `q_inflight`
 ///   is our shadow count of picks not-yet-observed-as-TTFT;
-///   `q_workload` is the sum of uncached blocks across our inflight
+///   `q_workload` is the sum of uncached tokens across our inflight
 ///   dispatches (the workload model's input).
 ///
 /// `q_inflight` only breaks ties in `pick_endpoint`; it isn't part of
@@ -670,7 +685,7 @@ pub fn format_score_table(
             let workload = &inflight_workload[i];
             let workload_blocks: u32 = workload
                 .iter()
-                .map(|s| s.uncached_at_dispatch as u64)
+                .map(|s| s.uncached_tokens as u64)
                 .sum::<u64>()
                 .min(u32::MAX as u64) as u32;
             (

@@ -112,8 +112,8 @@ config:
       predictor:
         base_ms: 400.0
         queue_ms_per_entry: 0.2
-        attention_uncached_block_ms: 2.3
-        attention_uncached_per_every_block_ms: 0.03
+        attention_uncached_token_ms: 0.14375
+        attention_uncached_per_every_token_ms: 0.0001171875
         cache_pressure_penalty_ms: 0.0
         q_running_penalty_peak_ms: 0
         forward_pass_ms: 5

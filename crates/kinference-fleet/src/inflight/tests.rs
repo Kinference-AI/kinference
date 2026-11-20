@@ -81,7 +81,7 @@ fn insert_then_dispatches_for_returns_one_entry() {
     let ds = p.dispatches_for("a:1");
     assert_eq!(ds.len(), 1);
     assert_eq!(ds[0].remaining, hs(&[10, 11, 12]));
-    assert_eq!(ds[0].uncached_at_dispatch, 7);
+    assert_eq!(ds[0].uncached_tokens, 7);
     assert!(p.dispatches_for("b:2").is_empty());
 }
 
@@ -99,10 +99,10 @@ fn dispatches_for_returns_oldest_first_with_full_snapshot() {
     assert_eq!(ds[0].remaining, hs(&[1]), "oldest first: {ds:?}");
     assert_eq!(ds[1].remaining, hs(&[2]));
     assert_eq!(ds[2].remaining, hs(&[3]));
-    // uncached_at_dispatch travels along with each entry.
-    let blocks: Vec<u32> = ds.iter().map(|d| d.uncached_at_dispatch).collect();
+    // uncached_tokens travels along with each entry.
+    let blocks: Vec<u32> = ds.iter().map(|d| d.uncached_tokens).collect();
     assert_eq!(blocks, vec![100, 200, 50]);
-    let totals: Vec<u32> = ds.iter().map(|d| d.total_at_dispatch).collect();
+    let totals: Vec<u32> = ds.iter().map(|d| d.input_tokens).collect();
     assert_eq!(totals, vec![500, 800, 200]);
     // dispatched_at is monotonic non-decreasing; callers rely on
     // position-as-age across the slice.
@@ -110,8 +110,8 @@ fn dispatches_for_returns_oldest_first_with_full_snapshot() {
     assert!(ds[1].dispatched_at <= ds[2].dispatched_at);
     // `.summary()` projects to the cheaper InflightSummary.
     let s1 = ds[1].summary();
-    assert_eq!(s1.uncached_at_dispatch, 200);
-    assert_eq!(s1.total_at_dispatch, 800);
+    assert_eq!(s1.uncached_tokens, 200);
+    assert_eq!(s1.input_tokens, 800);
     assert_eq!(s1.dispatched_at, ds[1].dispatched_at);
 }
 

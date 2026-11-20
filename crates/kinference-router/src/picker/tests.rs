@@ -19,6 +19,7 @@ fn make_worker(
         kv_cache_usage: kv,
         completion_rate_per_sec: completion,
         block_size: Some(16),
+        input_tokens: total * 16,
     }
 }
 
@@ -57,9 +58,8 @@ fn inputs<'a>(
     }
 }
 
-/// Build a single InflightSummary for use in tests. `dispatched_at`
-/// is `age_ms` before now. `total_at_dispatch` equals `uncached` (fully cold);
-/// see `summary_with_total`.
+/// An `InflightSummary` dispatched `age_ms` ago for a fully cold prompt of
+/// `uncached` tokens.
 fn summary(uncached: u32, age_ms: u64) -> InflightSummary {
     summary_with_total(uncached, uncached, age_ms)
 }
@@ -67,8 +67,8 @@ fn summary(uncached: u32, age_ms: u64) -> InflightSummary {
 fn summary_with_total(uncached: u32, total: u32, age_ms: u64) -> InflightSummary {
     InflightSummary {
         dispatched_at: std::time::Instant::now() - std::time::Duration::from_millis(age_ms),
-        uncached_at_dispatch: uncached,
-        total_at_dispatch: total,
+        uncached_tokens: uncached,
+        input_tokens: total,
     }
 }
 
@@ -507,7 +507,7 @@ fn format_score_table_renders_q_wait_and_q_inflight() {
     );
     assert!(
         table.contains("q_workload"),
-        "header must include q_workload (inflight workload blocks): {table}"
+        "header must include q_workload (inflight workload tokens): {table}"
     );
     assert!(
         table.contains("overlap/total"),
@@ -746,11 +746,11 @@ fn layered_overlap_empty_pending_returns_kv_for_any_alpha() {
 
 #[test]
 fn prefill_ms_quadratic_matches_short_prompt_anchor() {
-    // a=2.3, c=0.009: 520-block prompt fully cold should produce
-    // ~7 ms/block × 525 ≈ 3675 ms. (Synthetic-test calibration.)
+    // a=2.3, c=0.009: 525 uncached tokens of a 520-token prompt cost
+    // about 7 ms each.
     let predictor = PredictorConfig {
-        attention_uncached_block_ms: 2.3,
-        attention_uncached_per_every_block_ms: 0.009,
+        attention_uncached_token_ms: 2.3,
+        attention_uncached_per_every_token_ms: 0.009,
         ..Default::default()
     };
     let got = prefill_ms_for(&predictor, 525, 520);
@@ -763,11 +763,10 @@ fn prefill_ms_quadratic_matches_short_prompt_anchor() {
 
 #[test]
 fn prefill_ms_quadratic_matches_long_prompt_anchor() {
-    // Long prompt (1649 blocks): ~17 ms/block ≈ 28000 ms total.
-    // (Mooncake-anchor calibration.)
+    // A 1649-token prompt costs about 17 ms per uncached token.
     let predictor = PredictorConfig {
-        attention_uncached_block_ms: 2.3,
-        attention_uncached_per_every_block_ms: 0.009,
+        attention_uncached_token_ms: 2.3,
+        attention_uncached_per_every_token_ms: 0.009,
         ..Default::default()
     };
     let got = prefill_ms_for(&predictor, 1616, 1649);
@@ -782,8 +781,8 @@ fn prefill_ms_quadratic_matches_long_prompt_anchor() {
 fn prefill_ms_zero_uncached_is_zero() {
     // A pure warm hit has 0 prefill cost regardless of prompt length.
     let predictor = PredictorConfig {
-        attention_uncached_block_ms: 2.3,
-        attention_uncached_per_every_block_ms: 0.009,
+        attention_uncached_token_ms: 2.3,
+        attention_uncached_per_every_token_ms: 0.009,
         ..Default::default()
     };
     assert_eq!(prefill_ms_for(&predictor, 0, 1000), 0.0);
@@ -794,8 +793,8 @@ fn prefill_ms_zero_uncached_is_zero() {
 fn prefill_ms_linear_only_matches_legacy_behavior() {
     // A zero quadratic coefficient reduces to `a × uncached`.
     let predictor = PredictorConfig {
-        attention_uncached_block_ms: 7.0,
-        attention_uncached_per_every_block_ms: 0.0,
+        attention_uncached_token_ms: 7.0,
+        attention_uncached_per_every_token_ms: 0.0,
         ..Default::default()
     };
     for &total in &[100u32, 500, 2000] {
@@ -924,8 +923,8 @@ fn fresh_inflight_charged_near_full_prefill() {
     // 1000ms. Progress ≈ 1% → discount = (1 - 0.01) ≈ 0.99. Almost
     // the full prefill cost contends with us.
     let predictor = PredictorConfig {
-        attention_uncached_block_ms: 10.0,
-        attention_uncached_per_every_block_ms: 0.0,
+        attention_uncached_token_ms: 10.0,
+        attention_uncached_per_every_token_ms: 0.0,
         inflight_concurrent_capacity: 5,
         ..Default::default()
     };
@@ -947,8 +946,8 @@ fn done_inflight_contributes_nothing_to_queue_cost() {
     // No prefill ahead of this inflight → no contribution. Decode
     // contention is priced separately via `forward_pass_ms`.
     let predictor = PredictorConfig {
-        attention_uncached_block_ms: 10.0,
-        attention_uncached_per_every_block_ms: 0.0,
+        attention_uncached_token_ms: 10.0,
+        attention_uncached_per_every_token_ms: 0.0,
         inflight_concurrent_capacity: 5,
         ..Default::default()
     };
@@ -966,8 +965,8 @@ fn half_done_inflight_charged_at_half() {
     // Inflight dispatched 500ms ago, estimated prefill = 100 × 10 =
     // 1000ms. Progress = 0.5 → discount = (1 - 0.5) = 0.5.
     let predictor = PredictorConfig {
-        attention_uncached_block_ms: 10.0,
-        attention_uncached_per_every_block_ms: 0.0,
+        attention_uncached_token_ms: 10.0,
+        attention_uncached_per_every_token_ms: 0.0,
         inflight_concurrent_capacity: 5,
         ..Default::default()
     };
@@ -983,11 +982,11 @@ fn half_done_inflight_charged_at_half() {
 
 #[test]
 fn warm_hit_inflight_contributes_nothing_regardless_of_age() {
-    // An inflight with 0 uncached blocks contributes nothing to q_ms, however
+    // An inflight with 0 uncached tokens contributes nothing to q_ms, however
     // recently it was dispatched.
     let predictor = PredictorConfig {
-        attention_uncached_block_ms: 10.0,
-        attention_uncached_per_every_block_ms: 0.0,
+        attention_uncached_token_ms: 10.0,
+        attention_uncached_per_every_token_ms: 0.0,
         inflight_concurrent_capacity: 5,
         ..Default::default()
     };
@@ -1006,8 +1005,8 @@ fn overflow_position_charged_at_full_prefill_regardless_of_age() {
     // batch and gets full prefill cost regardless of how old it
     // appears.
     let predictor = PredictorConfig {
-        attention_uncached_block_ms: 10.0,
-        attention_uncached_per_every_block_ms: 0.0,
+        attention_uncached_token_ms: 10.0,
+        attention_uncached_per_every_token_ms: 0.0,
         inflight_concurrent_capacity: 2,
         ..Default::default()
     };
@@ -1032,8 +1031,8 @@ fn queue_waiting_disables_time_discount() {
     // With q_waiting > 0 the batch is at capacity, so every inflight is
     // charged its full prefill cost.
     let predictor = PredictorConfig {
-        attention_uncached_block_ms: 10.0,
-        attention_uncached_per_every_block_ms: 0.0,
+        attention_uncached_token_ms: 10.0,
+        attention_uncached_per_every_token_ms: 0.0,
         queue_ms_per_entry: 500.0,
         inflight_concurrent_capacity: 5,
         ..Default::default()
@@ -1050,7 +1049,7 @@ fn queue_waiting_disables_time_discount() {
         &[summary(100, 5000), summary(100, 4000)],
         Instant::now(),
     );
-    let expected = 2.0 * 1.0 * 100.0 * 10.0; // 2 inflights × full × blocks × prefill_ms
+    let expected = 2.0 * 1.0 * 100.0 * 10.0; // 2 inflights × full × tokens × prefill_ms
     assert!(
         (pred.q_ms - expected).abs() < 0.01,
         "q_waiting>0 should charge every inflight at full prefill: \
@@ -1065,8 +1064,8 @@ fn unknown_q_count_still_charged_at_baseline_rate() {
     // queue_waiting=5, only 1 inflight known. unknown_q_count=4,
     // each charged at q_rate_ms_per_entry.
     let predictor = PredictorConfig {
-        attention_uncached_block_ms: 10.0,
-        attention_uncached_per_every_block_ms: 0.0,
+        attention_uncached_token_ms: 10.0,
+        attention_uncached_per_every_token_ms: 0.0,
         queue_ms_per_entry: 500.0,
         inflight_concurrent_capacity: 5,
         ..Default::default()
@@ -1091,8 +1090,8 @@ fn capacity_one_charges_fresh_inflight_near_full_prefill() {
     // elapsed=10ms vs estimated 100×10=1000ms, progress=1% →
     // discount = (1 - 0.01) ≈ 0.99 → near full prefill.
     let predictor = PredictorConfig {
-        attention_uncached_block_ms: 10.0,
-        attention_uncached_per_every_block_ms: 0.0,
+        attention_uncached_token_ms: 10.0,
+        attention_uncached_per_every_token_ms: 0.0,
         inflight_concurrent_capacity: 1,
         ..Default::default()
     };
@@ -1109,7 +1108,7 @@ fn capacity_one_charges_fresh_inflight_near_full_prefill() {
 // ─── Cache-replication override ─────────────────────────────────
 
 /// Config for replication tests: zero queue/cache penalties and a flat
-/// 10ms-per-uncached-block prefill.
+/// 10 ms of prefill per uncached token, 160 ms per block of `make_worker`.
 fn replication_cfg() -> (PredictorConfig, PickerConfig) {
     let predictor = PredictorConfig {
         base_ms: 0.0,
@@ -1118,8 +1117,8 @@ fn replication_cfg() -> (PredictorConfig, PickerConfig) {
         saturated_cold_ms_per_entry: 0.0,
         cache_pressure_saturated_threshold: 1.0,
         inflight_concurrent_capacity: 5,
-        attention_uncached_block_ms: 10.0,
-        attention_uncached_per_every_block_ms: 0.0,
+        attention_uncached_token_ms: 10.0,
+        attention_uncached_per_every_token_ms: 0.0,
         // No U-shape penalty, to keep the arithmetic flat.
         q_running_penalty_peak_ms: 0.0,
         q_running_penalty_peak_qr: 2,
@@ -1216,9 +1215,9 @@ fn replication_skipped_when_already_at_target() {
 fn replication_counts_a_warm_worker_with_larger_blocks() {
     let (predictor, picker) = replication_cfg();
     let workers = vec![
-        // 95 of 100 small blocks: 50ms, the normal pick.
+        // 95 of 100 small blocks: 800ms, the normal pick.
         make_worker("small:1", 95, 100, 0, 1.0, 0.0),
-        // 19 of 25 large blocks: 60ms, and warm.
+        // 19 of 25 large blocks: 960ms, and warm.
         make_worker("large:1", 19, 25, 0, 1.0, 0.0),
         make_worker("cold:1", 0, 100, 0, 1.0, 0.0),
     ];
@@ -1408,4 +1407,47 @@ fn replication_threshold_pct_is_scale_invariant() {
         big, "warm:1",
         "large prompt should ALSO skip at pct=100; got {big}"
     );
+}
+
+/// A cold prompt costs the same prefill at every block size and without one.
+#[test]
+fn a_cold_prompt_costs_the_same_prefill_at_every_block_size() {
+    let predictor = PredictorConfig::default();
+    let tokens: u32 = 7_840;
+    let prefill = |block_size: Option<u32>| {
+        let w = WorkerScore {
+            block_size,
+            total_blocks: block_size.map_or(0, |b| tokens / b),
+            input_tokens: tokens,
+            ..make_worker("a:1", 0, 0, 0, 1.0, 0.0)
+        };
+        predicted_wait_ms(&w, &predictor, &[], Instant::now()).prefill_ms
+    };
+
+    let t = tokens as f32;
+    let cold = predictor.attention_uncached_token_ms * t
+        + predictor.attention_uncached_per_every_token_ms * t * t;
+    assert!(cold > 0.0);
+    for block_size in [None, Some(16), Some(64)] {
+        assert_eq!(prefill(block_size), cold, "{block_size:?}");
+    }
+}
+
+/// A matched block spares the worker one block size of tokens.
+#[test]
+fn matched_blocks_count_as_tokens_at_the_workers_block_size() {
+    let w = WorkerScore {
+        block_size: Some(64),
+        input_tokens: 200,
+        ..make_worker("a:1", 2, 3, 0, 1.0, 0.0)
+    };
+    assert_eq!(w.tokens_in(2), 128);
+    assert_eq!(w.uncached_tokens(), 72);
+    assert_eq!(w.tokens_in(4), 200, "never more than the prompt");
+
+    let unlearned = WorkerScore {
+        block_size: None,
+        ..w
+    };
+    assert_eq!(unlearned.uncached_tokens(), 200);
 }
