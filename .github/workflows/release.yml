@@ -154,6 +154,7 @@ jobs:
         include:
           - { target: aarch64-apple-darwin, runner: macos-15 }
           - { target: x86_64-unknown-linux-gnu, runner: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -267,7 +268,7 @@ jobs:
           $assets
           ## Install kinfctl
 
-          On macOS (Apple Silicon) or Linux (x86_64), the installer picks the right binary and puts it in \`~/.kinference/bin\`:
+          On macOS (Apple Silicon) or Linux (x86_64 or arm64), the installer picks the right binary and puts it in \`~/.kinference/bin\`:
 
           \`\`\`sh
           curl -fsSL https://raw.githubusercontent.com/$RELEASES_REPO/main/install.sh | KINFCTL_VERSION=$version sh
