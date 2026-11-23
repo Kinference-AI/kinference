@@ -45,7 +45,7 @@ impl FakeRender {
         let base = format!("http://{}", listener.local_addr().expect("local addr"));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let seen = requests.clone();
-        // Any path: a worker is POSTed `{http_url}/v1/chat/completions/render`.
+        // Any path: a worker is POSTed `{http_url}` plus a render path.
         let app =
             axum::Router::new().fallback(move |uri: axum::http::Uri, body: axum::body::Bytes| {
                 seen.lock().expect("requests").push(Seen {

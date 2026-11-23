@@ -19,8 +19,9 @@ pub(crate) struct Scoring {
     pub(crate) models: Arc<ModelIndex>,
     /// The fleet's scrape samples and `/v1/models` answers.
     pub(crate) scrape: Arc<MetricsRegistry>,
-    /// Which pools are degraded, and why, so each cause logs once.
-    degraded: WarnOnce<(kinference_policy::PoolId, Degraded)>,
+    /// Which pools are degraded, and why, so each cause logs once. The API
+    /// call is `None` for a cause that doesn't depend on it.
+    degraded: WarnOnce<(kinference_policy::PoolId, Option<ApiCall>, Degraded)>,
 }
 
 impl Scoring {
@@ -166,14 +167,19 @@ impl Scoring {
                 };
                 match tokenizer.tokenize(tok_req).await {
                     crate::tokenizer::TokenizeOutcome::Ok(tokens) => {
-                        self.degraded.clear(&(pool.id, Degraded::Tokenize));
+                        self.degraded
+                            .clear(&(pool.id, Some(api_call), Degraded::Tokenize));
                         tokens
                     }
                     crate::tokenizer::TokenizeOutcome::Unavailable { reason, attempts } => {
-                        if self.degraded.first(&(pool.id, Degraded::Tokenize)) {
+                        if self
+                            .degraded
+                            .first(&(pool.id, Some(api_call), Degraded::Tokenize))
+                        {
                             tracing::warn!(
                                 workerset = %pool.name,
                                 model,
+                                api = api_call.as_label(),
                                 attempts,
                                 reason = %reason,
                                 "tokenize failed; picking on load alone"
@@ -235,13 +241,13 @@ impl Scoring {
 
             let overlap = match pool.indexer.find_matches(hashes).await {
                 Ok(o) => {
-                    self.degraded.clear(&(pool.id, Degraded::PrefixIndex));
+                    self.degraded.clear(&(pool.id, None, Degraded::PrefixIndex));
                     o
                 }
                 Err(e) => {
                     // Degrade to load-only, reported as a prefix-index (not
                     // tokenize) failure.
-                    if self.degraded.first(&(pool.id, Degraded::PrefixIndex)) {
+                    if self.degraded.first(&(pool.id, None, Degraded::PrefixIndex)) {
                         tracing::warn!(
                             workerset = %pool.name,
                             block_size,

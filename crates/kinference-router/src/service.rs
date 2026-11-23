@@ -584,7 +584,7 @@ pub(crate) fn api_call_from_proto(value: i32) -> Result<ApiCall, Error> {
     use crate::proto::ApiCall as Wire;
     match Wire::try_from(value) {
         Ok(Wire::ChatCompletions) => Ok(ApiCall::ChatCompletions),
-        Ok(Wire::Messages) => Err(Error::UnsupportedApiCall(ApiCall::Messages)),
+        Ok(Wire::Messages) => Ok(ApiCall::Messages),
         Ok(Wire::MessagesCountTokens) => {
             Err(Error::UnsupportedApiCall(ApiCall::MessagesCountTokens))
         }
@@ -777,7 +777,7 @@ pub(crate) enum PickAndRecordOutcome {
     /// A policy refused the request, though workers may be available.
     /// `outcome=POLICY_REJECTED`.
     PolicyRejected { reason: String, model: String },
-    /// The body isn't a valid OpenAI ChatCompletionRequest, or has no model.
+    /// The body isn't a JSON object, or has no model.
     /// `model` is the best-known name, often empty.
     BadRequest { reason: String, model: String },
 }

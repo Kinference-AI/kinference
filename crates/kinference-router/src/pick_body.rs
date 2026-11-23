@@ -1,4 +1,4 @@
-//! Pick-time rewrites of the OpenAI request body.
+//! Pick-time rewrites of the request body.
 //!
 //! `PullBody()` serves a (possibly rewritten) body that the caller forwards
 //! upstream in place of the one it sent. Two rewrites live here:
@@ -7,11 +7,13 @@
 //!    alias becomes the concrete model, which the engine requires.
 //! 2. Streaming usage: for `stream=true`, vLLM only emits the final `usage`
 //!    block, which `ReportFinalToken` reports, when
-//!    `stream_options.include_usage=true`, so the flag is forced on.
+//!    `stream_options.include_usage=true`, so the flag is forced on. Chat
+//!    completions only: a Messages stream always reports usage.
 //!
 //! The rewrite works on the already-parsed body and reports whether anything
 //! changed, so an unchanged body is reused rather than re-serialized.
 
+use kinference_policy::ApiCall;
 use serde_json::Value;
 
 /// Rewrite just the `model` field of an already-serialized body.
@@ -55,9 +57,13 @@ pub(crate) fn stream_flag(obj: &Value) -> bool {
 /// Returns `true` if `obj` was modified, so the caller knows whether to
 /// re-serialize. A non-object body is left unchanged; the caller reports it as
 /// a bad request.
-pub(crate) fn apply_pick_body_mutations(obj: &mut Value, force_model: Option<&str>) -> bool {
+pub(crate) fn apply_pick_body_mutations(
+    obj: &mut Value,
+    force_model: Option<&str>,
+    api_call: ApiCall,
+) -> bool {
     // Read before taking the &mut borrow below.
-    let streaming = stream_flag(obj);
+    let streaming = api_call == ApiCall::ChatCompletions && stream_flag(obj);
     let Some(map) = obj.as_object_mut() else {
         return false;
     };
@@ -69,7 +75,7 @@ pub(crate) fn apply_pick_body_mutations(obj: &mut Value, force_model: Option<&st
         mutated = true;
     }
 
-    // (2) For streaming requests, ensure stream_options.include_usage=true so
+    // (2) For streaming chat completions, ensure stream_options.include_usage=true so
     //     the response carries the final usage block ReportFinalToken reports.
     if streaming {
         // Ensure `stream_options` exists AND is an object. `entry` avoids a

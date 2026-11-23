@@ -115,3 +115,99 @@ async fn compare_mode_returns_render() {
     let out = tokenizer.tokenize(req).await;
     assert_eq!(out, TokenizeOutcome::Ok(vec![5]));
 }
+
+const MESSAGES_BODY: &[u8] = br#"{"model":"m","max_tokens":8,"messages":[]}"#;
+
+/// A Messages request for model `m` with `MESSAGES_BODY` as the raw body.
+fn messages_request(workers: &[(u64, WorkerEntry)]) -> TokenizeRequest<'_> {
+    let mut req = request(workers, "m", raw());
+    req.api_call = ApiCall::Messages;
+    req.raw_body = Some(MESSAGES_BODY);
+    req
+}
+
+/// A Messages request posts the raw body to `/v1/messages/render` on a
+/// worker, in every mode.
+#[tokio::test]
+async fn a_messages_request_renders_in_every_mode() {
+    for mode in [
+        TokenizeMode::Render,
+        TokenizeMode::Local,
+        TokenizeMode::Compare,
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (tokenizer, registry) = by_mode(dir.path());
+        let fake = FakeRender::start(Render::Tokens(vec![7])).await;
+        let workers = [(
+            1,
+            worker("m", "10.0.0.1:8000", true, Some(fake.base().to_string())),
+        )];
+        let mut req = messages_request(&workers);
+        req.mode = mode;
+
+        let out = tokenizer.tokenize(req).await;
+        assert_eq!(out, TokenizeOutcome::Ok(vec![7]), "{mode:?}");
+        let seen = fake.requests();
+        assert_eq!(seen.len(), 1, "{mode:?}");
+        assert_eq!(seen[0].path, "/v1/messages/render", "{mode:?}");
+        assert_eq!(seen[0].body, MESSAGES_BODY, "{mode:?}");
+        let out = exposition(&registry);
+        assert!(
+            out.contains(r#"kinference_tokenize_total{api="messages",path="local"} 0"#),
+            "{mode:?}: {out}"
+        );
+        assert!(
+            out.contains(r#"kinference_tokenize_duration_ms_count{api="messages"} 1"#),
+            "{mode:?}: {out}"
+        );
+        // A comparison would run in a background task.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let out = exposition(&registry);
+        assert!(
+            !out.lines().any(|l| {
+                l.starts_with("kinference_tokenize_compare_total{") && !l.ends_with(" 0")
+            }),
+            "{mode:?}: {out}"
+        );
+    }
+}
+
+/// With `render_base_url`, a Messages request renders at the base URL plus
+/// `/v1/messages/render`.
+#[tokio::test]
+async fn a_messages_request_renders_at_the_base_url() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (tokenizer, _) = by_mode(dir.path());
+    let fake = FakeRender::start(Render::Tokens(vec![7])).await;
+    let base = format!("{}/", fake.base());
+    let mut req = messages_request(&[]);
+    req.render_base_url = Some(&base);
+
+    let out = tokenizer.tokenize(req).await;
+    assert_eq!(out, TokenizeOutcome::Ok(vec![7]));
+    let seen = fake.requests();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].path, "/v1/messages/render");
+    assert_eq!(seen[0].body, MESSAGES_BODY);
+}
+
+/// A Messages request without a raw body is unavailable and calls nothing.
+#[tokio::test]
+async fn a_messages_request_without_a_body_is_unavailable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (tokenizer, _) = by_mode(dir.path());
+    let fake = FakeRender::start(Render::Tokens(vec![7])).await;
+    let workers = [(
+        1,
+        worker("m", "10.0.0.1:8000", true, Some(fake.base().to_string())),
+    )];
+    let mut req = messages_request(&workers);
+    req.raw_body = None;
+
+    let out = tokenizer.tokenize(req).await;
+    assert!(
+        matches!(out, TokenizeOutcome::Unavailable { attempts: 0, .. }),
+        "{out:?}"
+    );
+    assert_eq!(fake.calls(), 0);
+}
