@@ -552,9 +552,9 @@ pub fn rejected_provider_status(
     let prev = previous.map(|s| s.conditions.as_slice());
     let msg = match reason {
         R::UnsupportedApiFormat => {
-            "spec.api names a wire format nothing translates to. Only OpenAI is \
-             supported; point baseURL at the vendor's OpenAI-compatible endpoint, or \
-             front it with a proxy that exposes one"
+            "spec.api names a wire format that kinference doesn't route. Only OpenAI \
+             and Anthropic are supported; point baseURL at the vendor's \
+             OpenAI-compatible endpoint, or front it with a proxy that exposes one"
         }
         R::Incomplete => {
             "spec is missing something required: backendRef.name, api, or at least \

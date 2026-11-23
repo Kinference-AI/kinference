@@ -509,11 +509,17 @@ impl KinferenceService {
         })
     }
 
-    /// Whether any provider in the named pool declares this canonical model.
+    /// Whether any provider in the named pool declares this canonical model
+    /// and speaks the format of `api_call`.
     ///
     /// Consulted after `resolve_pools` came back empty, so a model only a
     /// provider serves isn't refused before `policy_select` runs.
-    fn provider_serves(&self, pool_ref: Option<&kinference_policy::PoolRef>, model: &str) -> bool {
+    fn provider_serves(
+        &self,
+        pool_ref: Option<&kinference_policy::PoolRef>,
+        model: &str,
+        api_call: ApiCall,
+    ) -> bool {
         let Some(store) = self.policy.as_ref() else {
             return false;
         };
@@ -528,7 +534,7 @@ impl KinferenceService {
             .destinations
             .iter()
             .filter_map(|d| d.as_provider())
-            .any(|p| !p.upstreams_for(model).is_empty())
+            .any(|p| p.speaks(api_call) && !p.upstreams_for(model).is_empty())
     }
 }
 

@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 use kube::{Resource, ResourceExt};
 
-use super::PoolId;
 use super::compile::CompiledPolicy;
 use super::crd::{
     ApiFormat, BackendType, HTTPRoute, InferencePolicy, InferencePool, InferenceProvider,
@@ -23,6 +22,7 @@ use super::crd::{
 };
 use super::engine::ObjectKey;
 use super::services::ServiceIndex;
+use super::{ApiCall, PoolId};
 
 /// `(namespace, name)`.
 pub type ObjKey = (String, String);
@@ -53,7 +53,7 @@ pub enum UnresolvedReason {
     CrossNamespaceNotGranted,
     /// The object is missing a field kinference needs to route to it.
     Incomplete,
-    /// An `InferenceProvider` declared a wire format nothing translates to.
+    /// An `InferenceProvider` declared a wire format that no API call uses.
     ///
     /// The schema also forbids these, but an object that predates it or
     /// bypassed validation must still deserialize, so `ApiFormat` keeps every
@@ -201,6 +201,8 @@ pub struct ResolvedProvider {
     /// The `GatewayBackend`, with its namespace resolved so the caller never
     /// has to default one.
     pub backend_ref: ObjectKey,
+    /// `spec.api`: `OpenAI` or `Anthropic`.
+    pub api: ApiFormat,
     /// `spec.path`: the path the caller dispatches on instead of the one the
     /// client sent. `None` leaves the request line alone. Not validated beyond
     /// emptiness.
@@ -210,6 +212,14 @@ pub struct ResolvedProvider {
 }
 
 impl ResolvedProvider {
+    /// Whether this provider speaks the format of `api_call`.
+    pub fn speaks(&self, api_call: ApiCall) -> bool {
+        match api_call {
+            ApiCall::ChatCompletions => self.api == ApiFormat::OpenAI,
+            ApiCall::Messages | ApiCall::MessagesCountTokens => self.api == ApiFormat::Anthropic,
+        }
+    }
+
     /// `(name, context_window)` for a requested name, one per matching row.
     pub fn upstreams_for(&self, canonical: &str) -> Vec<(String, Option<u32>)> {
         self.models
@@ -923,8 +933,7 @@ fn resolve_provider(
         .ok_or(UnresolvedReason::Incomplete)?;
     let backend_name = backend.name.clone().ok_or(UnresolvedReason::Incomplete)?;
     let api = prov.spec.api.ok_or(UnresolvedReason::Incomplete)?;
-    // Nothing translates other formats yet.
-    if api != ApiFormat::OpenAI {
+    if !matches!(api, ApiFormat::OpenAI | ApiFormat::Anthropic) {
         return Err(UnresolvedReason::UnsupportedApiFormat);
     }
 
@@ -972,6 +981,7 @@ fn resolve_provider(
         uid: prov.uid(),
         labels: prov.labels().clone().into_iter().collect(),
         backend_ref: ObjectKey::new(backend_ns, backend_name),
+        api,
         // An empty path means no rewrite. Anything else passes through; the
         // schema's `^/` is the only check.
         path: prov

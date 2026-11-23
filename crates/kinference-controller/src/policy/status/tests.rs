@@ -1296,7 +1296,7 @@ fn a_refused_provider_reports_the_reason_and_the_fix() {
     assert_eq!(accepted.reason, "UnsupportedApiFormat");
     // The message says how to fix it.
     assert!(
-        accepted.message.contains("Only OpenAI"),
+        accepted.message.contains("Only OpenAI and Anthropic"),
         "{}",
         accepted.message
     );

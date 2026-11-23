@@ -28,12 +28,12 @@ use axum::{
     http::{HeaderValue, StatusCode, Uri, header},
     response::{IntoResponse, Response},
 };
-use kinference_policy::PoolId;
 use kinference_policy::crd::{OnEmpty, Unmatched};
 use kinference_policy::engine::{Candidate, CandidateTarget, ObjectKey};
 use kinference_policy::explain::{self, Explanation, RuleStep};
 use kinference_policy::predicate::{CandidateAttrs, QOS_VALUES, RequestAttrs};
 use kinference_policy::resolve::{PolicyIndex, ResolvedPool};
+use kinference_policy::{ApiCall, PoolId};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
@@ -688,6 +688,11 @@ pub(super) struct SimRequest {
     input_tokens: Option<i64>,
     #[serde(default)]
     max_tokens: Option<i64>,
+    /// The API call of the request, as the `api` metric label spells it.
+    /// Absent means `chat_completions`. The simulation drops each provider
+    /// candidate whose provider in `pool` doesn't speak the format.
+    #[serde(default)]
+    api_call: Option<String>,
     #[serde(default)]
     candidates: Vec<CandidateOverride>,
     /// Repeat the evaluation and return a distribution of outcomes, 1..=500.
@@ -697,6 +702,14 @@ pub(super) struct SimRequest {
 }
 
 impl SimRequest {
+    /// `None` for an `apiCall` that is no `api` label value.
+    fn api_call(&self) -> Option<ApiCall> {
+        match self.api_call.as_deref() {
+            None => Some(ApiCall::default()),
+            Some(label) => ApiCall::ALL.into_iter().find(|c| c.as_label() == label),
+        }
+    }
+
     /// Everything that can be judged without the snapshot. Each failure names
     /// the field, so a caller fixes the request without guessing.
     fn validate(&self) -> Result<(), ApiError> {
@@ -756,6 +769,16 @@ impl SimRequest {
                     format!("must be 0..={MAX_TOKENS}"),
                 ));
             }
+        }
+        if self.api_call().is_none() {
+            let known = ApiCall::ALL.map(ApiCall::as_label);
+            return Err(ApiError::invalid(
+                "apiCall",
+                format!(
+                    "unknown apiCall `{}`; one of {known:?}, or omit it",
+                    self.api_call.as_deref().unwrap_or_default()
+                ),
+            ));
         }
         if let Some(r) = self.runs
             && !(1..=MAX_RUNS).contains(&r)
@@ -1257,9 +1280,19 @@ fn run_simulation(st: &PolicyApiState, snap: &PolicyIndex, req: &SimRequest) -> 
             .insert(c.endpoint.as_deref().unwrap_or("simulated"));
     }
 
+    let api_call = req.api_call().expect("validated");
+    let speaks = |o: &CandidateOverride| {
+        o.backend_type != "Provider"
+            || pool
+                .and_then(|p| p.backend(&o.backend_name))
+                .and_then(|d| d.as_provider())
+                .is_none_or(|prov| prov.speaks(api_call))
+    };
+
     let built: Vec<(Candidate, Prediction)> = req
         .candidates
         .iter()
+        .filter(|o| speaks(o))
         .map(|o| {
             let p = predict(st, pool, o, req.input_tokens);
             let ready = o.ready_endpoints.or_else(|| {

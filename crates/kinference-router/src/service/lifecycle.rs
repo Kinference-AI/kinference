@@ -250,7 +250,7 @@ impl KinferenceService {
         // A model no local pool serves may still be served by a provider in
         // the named pool, so check before refusing.
         if serving.is_empty() {
-            if !self.provider_serves(req.pool_ref, &model) {
+            if !self.provider_serves(req.pool_ref, &model, req.api_call) {
                 tracing::debug!(model = %model, "no worker set serves the model");
                 return Err(PickAndRecordOutcome::NoWorkers { model });
             }

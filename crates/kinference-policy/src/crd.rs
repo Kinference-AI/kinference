@@ -296,7 +296,7 @@ pub struct InferenceProviderSpec {
     /// Required by the schema; see the module docs for why it is `Option`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_ref: Option<BackendObjectRef>,
-    /// Wire format. kinference only names it; the caller translates.
+    /// Wire format. A provider receives only the API calls of its format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api: Option<ApiFormat>,
     /// Path the caller must dispatch on, replacing the one the client sent.
@@ -331,7 +331,6 @@ pub struct BackendObjectRef {
 /// Wire format an upstream speaks.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum ApiFormat {
-    /// The only pass-through.
     #[default]
     OpenAI,
     Anthropic,

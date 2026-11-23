@@ -47,10 +47,10 @@ spec:
                   namespace: {type: string, maxLength: 253}
               api:
                 description: |-
-                  Wire format that the provider speaks. The only
-                  currently-supported value is `OpenAI`.
+                  Wire format that the provider speaks. A provider
+                  receives only the requests of its format.
                 type: string
-                enum: [OpenAI]
+                enum: [OpenAI, Anthropic]
               path:
                 description: |-
                   Path to dispatch on, replacing the one the client sent.

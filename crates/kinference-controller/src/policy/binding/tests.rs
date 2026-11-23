@@ -92,6 +92,7 @@ fn provider(name: &str, backend_ns: &str, backend: &str) -> ResolvedDestination 
         uid: None,
         labels: BTreeMap::new(),
         backend_ref: ObjectKey::new(backend_ns, backend),
+        api: kinference_policy::crd::ApiFormat::OpenAI,
         path: None,
         models: Vec::new(),
     })
