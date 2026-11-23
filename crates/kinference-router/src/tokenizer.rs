@@ -23,6 +23,7 @@ use kinference_fleet::pool::PoolRegistry;
 use kinference_fleet::profile::TokenizeMode;
 use kinference_fleet::scrape::MetricsRegistry;
 use kinference_fleet::workers::WorkerEntry;
+use kinference_policy::ApiCall;
 
 pub mod compare;
 pub mod http;
@@ -90,6 +91,7 @@ pub(crate) enum TokenizeOutcome {
 pub(crate) struct TokenizeRequest<'a> {
     /// The pool's mode. Read by [`ByMode`]; a backend serves one mode.
     pub mode: TokenizeMode,
+    pub api_call: ApiCall,
     /// Base URL of a render service; `None` rotates across `workers`.
     pub render_base_url: Option<&'a str>,
     pub workers: &'a [(u64, WorkerEntry)],
@@ -141,10 +143,10 @@ impl Tokenizer for ByMode {
                 TokenizeMode::Compare => self.compare.render_then_compare(&req).await,
             };
             self.prom
-                .record_tokenize_duration(started.elapsed().as_secs_f64() * 1000.0);
+                .record_tokenize_duration(req.api_call, started.elapsed().as_secs_f64() * 1000.0);
             if matches!(outcome, TokenizeOutcome::Unavailable { .. }) {
                 // Successful paths are counted where they succeed.
-                self.prom.record_tokenize_path("unavailable");
+                self.prom.record_tokenize_path(req.api_call, "unavailable");
             }
             outcome
         })

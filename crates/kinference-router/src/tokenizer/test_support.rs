@@ -139,6 +139,7 @@ pub(crate) fn request<'a>(
 ) -> TokenizeRequest<'a> {
     TokenizeRequest {
         mode: TokenizeMode::Render,
+        api_call: kinference_policy::ApiCall::ChatCompletions,
         render_base_url: None,
         workers,
         model,

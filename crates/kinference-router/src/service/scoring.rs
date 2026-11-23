@@ -96,6 +96,7 @@ impl Scoring {
         tokenizer: &dyn crate::tokenizer::Tokenizer,
         pool: &Pool,
         model: &str,
+        api_call: ApiCall,
         input: ScoreInput,
         chat_kwargs: HashMap<String, String>,
     ) -> (ScoreOutcome, ScoreSideData) {
@@ -156,6 +157,7 @@ impl Scoring {
             TokenSource::NeedsTokenize(tok_input) => {
                 let tok_req = crate::tokenizer::TokenizeRequest {
                     mode: pool.tokenize_mode,
+                    api_call,
                     render_base_url: pool.render_base_url.as_deref(),
                     workers: &workers,
                     model,

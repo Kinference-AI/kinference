@@ -21,7 +21,7 @@ use tracing::Instrument;
 
 use crate::metrics::PickOutcome;
 use crate::observations::{FinalTokenReport, Qos};
-use crate::service::{KinferenceService, PickAndRecordOutcome};
+use crate::service::{KinferenceService, PickAndRecordOutcome, PickInput, api_call_from_proto};
 
 use crate::proto;
 use crate::proto::picker_server::{Picker, PickerServer};
@@ -96,14 +96,21 @@ impl Picker for KinferenceService {
     /// `pick_and_record`, and re-key the body to the minted `response_id` for
     /// `PullBody`.
     ///
-    /// `Err(Status)` only for body-lookup failures; routing outcomes come back
-    /// in the `PickResponse`.
+    /// `Err(Status)` only for a body-lookup failure or a rejected `api_call`;
+    /// routing outcomes come back in the `PickResponse`.
     async fn pick(&self, request: Request<PickRequest>) -> Result<Response<PickResponse>, Status> {
         let req = request.into_inner();
         let start = Instant::now();
         // Claim the body first: no point minting ids or scoring if the caller
         // named a body we don't have.
         let handle = self.bodies.store.begin_pick(req.body_stream_id)?;
+        let api_call = match api_call_from_proto(req.api_call) {
+            Ok(api_call) => api_call,
+            Err(err) => {
+                handle.discard();
+                return Err(Status::invalid_argument(err.to_string()));
+            }
+        };
         let pushed = handle.body().clone();
 
         let response_id = self.mint_response_id();
@@ -132,14 +139,15 @@ impl Picker for KinferenceService {
             model = tracing::field::Empty,
         );
         let outcome = self
-            .pick_and_record(
-                &pushed,
-                response_id,
+            .pick_and_record(PickInput {
+                body: &pushed,
+                request_id: response_id,
                 client_request_id,
                 qos,
-                pool_ref.as_ref(),
-                &identity,
-            )
+                api_call,
+                pool_ref: pool_ref.as_ref(),
+                identity: &identity,
+            })
             .instrument(span)
             .await;
         let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -251,7 +259,8 @@ impl Picker for KinferenceService {
                 )
             }
         };
-        self.prom.record_pick(pick_outcome.as_label(), latency_ms);
+        self.prom
+            .record_pick(api_call, pick_outcome.as_label(), latency_ms);
         Ok(Response::new(response))
     }
 

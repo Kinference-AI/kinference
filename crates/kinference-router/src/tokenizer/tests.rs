@@ -42,12 +42,14 @@ async fn render_mode_renders() {
     assert_eq!(out, TokenizeOutcome::Ok(vec![1]));
     let out = exposition(&registry);
     assert!(
-        out.contains("kinference_tokenize_duration_ms_count 1"),
+        out.contains(r#"kinference_tokenize_duration_ms_count{api="chat_completions"} 1"#),
         "{out}"
     );
     for path in ["local", "http_fallback", "unavailable"] {
         assert!(
-            out.contains(&format!(r#"kinference_tokenize_total{{path="{path}"}} 0"#)),
+            out.contains(&format!(
+                r#"kinference_tokenize_total{{api="chat_completions",path="{path}"}} 0"#
+            )),
             "{out}"
         );
     }
@@ -67,11 +69,11 @@ async fn an_unavailable_outcome_is_counted_once() {
     );
     let out = exposition(&registry);
     assert!(
-        out.contains(r#"kinference_tokenize_total{path="unavailable"} 1"#),
+        out.contains(r#"kinference_tokenize_total{api="chat_completions",path="unavailable"} 1"#),
         "{out}"
     );
     assert!(
-        out.contains("kinference_tokenize_duration_ms_count 1"),
+        out.contains(r#"kinference_tokenize_duration_ms_count{api="chat_completions"} 1"#),
         "{out}"
     );
 }
@@ -88,11 +90,11 @@ async fn local_mode_uses_the_local_backend() {
     assert_eq!(out, TokenizeOutcome::Ok(vec![99, 0, 1]));
     let out = exposition(&registry);
     assert!(
-        out.contains(r#"kinference_tokenize_total{path="local"} 1"#),
+        out.contains(r#"kinference_tokenize_total{api="chat_completions",path="local"} 1"#),
         "{out}"
     );
     assert!(
-        out.contains("kinference_tokenize_duration_ms_count 1"),
+        out.contains(r#"kinference_tokenize_duration_ms_count{api="chat_completions"} 1"#),
         "{out}"
     );
 }
