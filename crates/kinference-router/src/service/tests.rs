@@ -197,6 +197,7 @@ fn resolved_provider(
         namespace: "default".into(),
         labels: std::collections::BTreeMap::new(),
         backend_ref: kinference_policy::engine::ObjectKey::new("default", format!("{name}-be")),
+        api: kinference_policy::crd::ApiFormat::OpenAI,
         path: None,
         models: models
             .iter()
@@ -873,6 +874,95 @@ async fn an_alias_reaches_a_provider_serving_its_own_build() {
     };
     assert_eq!(pick.upstream_model, "vendor/qwen-turbo");
     assert_eq!(model_in(&body), "vendor/qwen-turbo");
+}
+
+/// A service where worker set `qwen-ws` serves `qwen`, the OpenAI provider
+/// `openai` and the Anthropic provider `anthropic` both declare `qwen`, and
+/// one rule sends every request to the providers.
+async fn fleet_with_a_provider_of_each_api() -> TestService {
+    ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .provider(
+            "openai",
+            serde_json::json!([{"name": "openai/qwen", "aliases": ["qwen"]}]),
+        )
+        .anthropic_provider(
+            "anthropic",
+            serde_json::json!([{"name": "anthropic/qwen", "aliases": ["qwen"]}]),
+        )
+        .policy(serde_json::json!({"rules": [{"name": "to-cloud", "route": {
+            "consider": [{"type": "Provider"}],
+            "select": [{"order": ["anthropic", "openai"]}]}}]}))
+        .build()
+        .await
+}
+
+/// The provider that `policy_select` returns for `api_call` in
+/// [`fleet_with_a_provider_of_each_api`].
+async fn provider_for(api_call: ApiCall) -> String {
+    let t = fleet_with_a_provider_of_each_api().await;
+    let start = primary(&t.pools[0], "qwen", &[("10.0.0.1:8000", 0)]);
+    let attrs = kinference_policy::predicate::RequestAttrs {
+        model: vec!["qwen".into()],
+        requested_model: "qwen".into(),
+        ..Default::default()
+    };
+    let out = t
+        .svc
+        .policy_select(
+            &TestService::pool_ref(),
+            t.store(),
+            Some(start),
+            "qwen",
+            api_call,
+            None,
+            attrs,
+        )
+        .await;
+    match out {
+        Ok(PolicySelection::Provider(pick)) => pick.upstream_model,
+        _ => panic!("expected a provider for {api_call:?}"),
+    }
+}
+
+/// The policy driver drops each provider that doesn't speak the format of
+/// the API call, even when the policy orders that provider first.
+#[tokio::test]
+async fn a_pick_reaches_only_the_providers_of_its_api() {
+    assert_eq!(provider_for(ApiCall::ChatCompletions).await, "openai/qwen");
+    assert_eq!(provider_for(ApiCall::Messages).await, "anthropic/qwen");
+    assert_eq!(
+        provider_for(ApiCall::MessagesCountTokens).await,
+        "anthropic/qwen"
+    );
+}
+
+/// A chat-completion pick for a model that only an Anthropic provider
+/// declares finds no destination.
+#[tokio::test]
+async fn a_chat_completion_pick_never_returns_an_anthropic_provider() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .anthropic_provider("anthropic", serde_json::json!([{"name": "claude"}]))
+        .policy(serde_json::json!({"rules": [{"name": "to-cloud", "route": {
+            "consider": [{"type": "Provider"}],
+            "select": [{"order": ["anthropic"]}]}}]}))
+        .build()
+        .await;
+    let pool = TestService::pool_ref();
+
+    let body = br#"{"model":"claude","messages":[{"role":"user","content":"hi"}]}"#;
+    let out = t.pick(body, 1, Qos::Interactive, Some(&pool)).await;
+    assert!(
+        matches!(out, PickAndRecordOutcome::NoWorkers { .. }),
+        "got {out:?}"
+    );
+
+    let out = t.pick(BODY, 2, Qos::Interactive, Some(&pool)).await;
+    assert!(
+        matches!(out, PickAndRecordOutcome::PolicyRejected { .. }),
+        "got {out:?}"
+    );
 }
 
 /// A service where `qwen` is served by worker set `qwen-ws` and by provider

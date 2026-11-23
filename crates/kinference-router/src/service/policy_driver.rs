@@ -141,6 +141,9 @@ impl KinferenceService {
                     let dest = match dest {
                         kinference_policy::resolve::ResolvedDestination::Local(local) => local,
                         kinference_policy::resolve::ResolvedDestination::Provider(prov) => {
+                            if !prov.speaks(api_call) {
+                                continue;
+                            }
                             let dest =
                                 CandidateDest::Provider(prov.namespace.clone(), prov.name.clone());
                             for c in provider_candidates_for(

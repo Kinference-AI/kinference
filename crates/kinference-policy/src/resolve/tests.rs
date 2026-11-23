@@ -1308,13 +1308,12 @@ fn a_policy_shared_by_two_pools_is_compiled_once() {
     assert!(Arc::ptr_eq(&a, &idx.policies().next().unwrap().policy));
 }
 
-// --- OpenAI-compatible only --------------------------------------------
+// --- provider wire formats ---------------------------------------------
 
-/// A format nothing translates to doesn't become a destination.
+/// A format that no API call uses doesn't become a destination.
 #[test]
-fn a_non_openai_api_is_refused() {
+fn an_api_that_no_api_call_uses_is_refused() {
     for api in [
-        ApiFormat::Anthropic,
         ApiFormat::Bedrock,
         ApiFormat::VertexAI,
         ApiFormat::AzureOpenAI,
@@ -1347,11 +1346,11 @@ fn a_non_openai_api_is_refused() {
 fn a_bypassed_object_still_parses_before_it_is_refused() {
     let spec: crate::crd::InferenceProviderSpec = serde_json::from_value(serde_json::json!({
         "backendRef": {"name": "b"},
-        "api": "Anthropic",
+        "api": "Bedrock",
         "models": [{"name": "up", "aliases": ["bar"]}]
     }))
     .expect("a value the CRD no longer admits must still DESERIALIZE");
-    assert_eq!(spec.api, Some(ApiFormat::Anthropic));
+    assert_eq!(spec.api, Some(ApiFormat::Bedrock));
 
     let prov = Arc::new(InferenceProvider {
         metadata: meta("p", "infra"),
@@ -1364,13 +1363,33 @@ fn a_bypassed_object_still_parses_before_it_is_refused() {
     );
 }
 
-/// `api` is validated and then discarded; the wire carries no format.
+/// An OpenAI provider and an Anthropic provider both resolve, with their `api`.
 #[test]
-fn openai_still_resolves() {
-    let prov = provider("p", "infra", "b", None, vec![("bar", "up", None)]);
-    let r = resolve_provider(&prov, &[]).expect("resolves");
-    assert_eq!(r.name, "p");
-    assert_eq!(r.backend_ref, ObjectKey::new("infra", "b"));
+fn openai_and_anthropic_resolve() {
+    for api in [ApiFormat::OpenAI, ApiFormat::Anthropic] {
+        let mut prov = provider("p", "infra", "b", None, vec![("bar", "up", None)]);
+        Arc::get_mut(&mut prov).unwrap().spec.api = Some(api);
+        let r = resolve_provider(&prov, &[]).expect("resolves");
+        assert_eq!(r.name, "p");
+        assert_eq!(r.backend_ref, ObjectKey::new("infra", "b"));
+        assert_eq!(r.api, api);
+    }
+}
+
+/// A provider speaks only the API calls of its own format.
+#[test]
+fn a_provider_speaks_only_the_api_calls_of_its_format() {
+    let mut prov = provider("p", "infra", "b", None, vec![("bar", "up", None)]);
+    let openai = resolve_provider(&prov, &[]).expect("resolves");
+    assert!(openai.speaks(ApiCall::ChatCompletions));
+    assert!(!openai.speaks(ApiCall::Messages));
+    assert!(!openai.speaks(ApiCall::MessagesCountTokens));
+
+    Arc::get_mut(&mut prov).unwrap().spec.api = Some(ApiFormat::Anthropic);
+    let anthropic = resolve_provider(&prov, &[]).expect("resolves");
+    assert!(!anthropic.speaks(ApiCall::ChatCompletions));
+    assert!(anthropic.speaks(ApiCall::Messages));
+    assert!(anthropic.speaks(ApiCall::MessagesCountTokens));
 }
 
 /// A bare `resolve` carries an unlisted `Service` view; the watcher attaches

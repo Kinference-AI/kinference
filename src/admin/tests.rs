@@ -1112,6 +1112,99 @@ async fn a_backed_up_local_worker_fails_over_to_the_provider() {
     );
 }
 
+/// `simulate` drops a provider candidate whose provider in the pool doesn't
+/// speak the format of `apiCall`. Without `apiCall`, the request is a chat
+/// completion.
+#[tokio::test]
+async fn simulate_drops_a_provider_that_does_not_speak_the_api_call() {
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use kinference_policy::crd::{InferencePolicy, InferencePool, InferenceProvider};
+    let meta = |name: &str| ObjectMeta {
+        name: Some(name.into()),
+        namespace: Some("default".into()),
+        ..Default::default()
+    };
+    let provider = |name: &str, api: &str| {
+        Arc::new(InferenceProvider {
+            metadata: meta(name),
+            spec: serde_json::from_value(serde_json::json!({
+                "backendRef": {"name": "backend"}, "api": api, "models": [{"name": "m"}],
+            }))
+            .unwrap(),
+            status: None,
+        })
+    };
+    let pool = Arc::new(InferencePool {
+        metadata: meta("pool"),
+        spec: serde_json::from_value(serde_json::json!({
+            "destinations": [{"kind": "InferenceProvider", "name": "openai"},
+                             {"kind": "InferenceProvider", "name": "anthropic"}],
+            "policyRef": {"name": "p"},
+        }))
+        .unwrap(),
+        status: None,
+    });
+    let policy = Arc::new(InferencePolicy {
+        metadata: meta("p"),
+        spec: serde_json::from_value(serde_json::json!({"rules": [{"name": "r", "route": {
+            "consider": [{"type": "Provider"}],
+            "select": [{"order": ["anthropic", "openai"]}]}}]}))
+        .unwrap(),
+        status: None,
+    });
+    let store = kinference_policy::store::PolicyStore::new();
+    store.publish(Arc::new(kinference_policy::resolve::resolve(
+        &[pool],
+        &[policy],
+        &[],
+        &[
+            provider("openai", "OpenAI"),
+            provider("anthropic", "Anthropic"),
+        ],
+        &[],
+        &[],
+        &std::collections::BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
+    )));
+
+    for (api_call, winner) in [
+        (None, "openai"),
+        (Some("chat_completions"), "openai"),
+        (Some("messages"), "anthropic"),
+        (Some("messages_count_tokens"), "anthropic"),
+    ] {
+        let mut body = serde_json::json!({
+            "policy": "default/p", "pool": "default/pool", "requestedModel": "m",
+            "candidates": [
+                {"backendName": "openai", "backendType": "Provider", "canonicalModel": "m"},
+                {"backendName": "anthropic", "backendType": "Provider", "canonicalModel": "m"},
+            ]
+        });
+        if let Some(api_call) = api_call {
+            body["apiCall"] = api_call.into();
+        }
+        let req = serde_json::from_value(body).unwrap();
+        let (status, v) = body_of(
+            policy_api::simulate(
+                State(api_state(Some(store.clone()))),
+                policy_api::ApiJson(req),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert!(
+            v["winner"].as_str().unwrap().contains(winner),
+            "{api_call:?}: {v}"
+        );
+        assert_eq!(
+            v["effectiveCandidates"].as_array().unwrap().len(),
+            1,
+            "{api_call:?}: {v}"
+        );
+    }
+}
+
 // ── The /api contract, through the real router ───────────────────────────────
 //
 // Through `router()`, to cover routing, JSON rejections, the body limit and
@@ -1344,6 +1437,11 @@ async fn out_of_range_values_name_their_field() {
         (
             serde_json::json!({"policy": "default/policy-5", "qos": "realtime"}),
             "qos",
+            400,
+        ),
+        (
+            serde_json::json!({"policy": "default/policy-5", "apiCall": "Messages"}),
+            "apiCall",
             400,
         ),
         (

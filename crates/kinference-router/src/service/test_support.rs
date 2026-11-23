@@ -42,7 +42,7 @@ enum Policy {
 
 pub(crate) struct ServiceBuilder {
     pools: Vec<PoolFixture>,
-    providers: Vec<(String, serde_json::Value)>,
+    providers: Vec<(String, &'static str, serde_json::Value)>,
     policy: Policy,
     render: Render,
 }
@@ -103,7 +103,13 @@ impl ServiceBuilder {
     /// An `InferenceProvider` among the pool's destinations; `models` is its
     /// `spec.models`.
     pub(crate) fn provider(mut self, name: &str, models: serde_json::Value) -> Self {
-        self.providers.push((name.into(), models));
+        self.providers.push((name.into(), "OpenAI", models));
+        self
+    }
+
+    /// [`Self::provider`], with `api: Anthropic`.
+    pub(crate) fn anthropic_provider(mut self, name: &str, models: serde_json::Value) -> Self {
+        self.providers.push((name.into(), "Anthropic", models));
         self
     }
 
@@ -183,11 +189,11 @@ impl ServiceBuilder {
             }
             Policy::Spec(spec) => {
                 let mut provs = Vec::new();
-                for (name, models) in &self.providers {
+                for (name, api, models) in &self.providers {
                     provs.push(cr::<InferenceProvider>(serde_json::json!({
                         "apiVersion": "kinference.buoyant.io/v1alpha1", "kind": "InferenceProvider",
                         "metadata": {"name": name, "namespace": "default"},
-                        "spec": {"backendRef": {"name": format!("{name}-backend")}, "api": "OpenAI",
+                        "spec": {"backendRef": {"name": format!("{name}-backend")}, "api": api,
                                  "models": models}
                     })));
                     dests.push(serde_json::json!({"kind": "InferenceProvider", "name": name}));
