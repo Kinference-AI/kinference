@@ -290,8 +290,8 @@ needs an SSE event scanner for a Messages response.
 - Config: `render_base_url` replaces `render_url` on a worker set.
   The operator sets `render_base_url` to the former `render_url`
   without the render path.
-- An `InferenceProvider` with `api: Anthropic` resolves. The CRD
-  schema doesn't change.
+- An `InferenceProvider` with `api: Anthropic` resolves. The `api`
+  enum of the CRD schema gains `Anthropic`.
 - The explain request of the admin policy API takes the API call.
 - The `api` label on the four metric families.
 - A worker needs vLLM v0.29.0 or later and, from v0.30.0,
@@ -311,8 +311,10 @@ Every existing config file loads. A worker set that still has
 An `InferenceProvider` with `api: Anthropic` moves from unresolved
 to resolved and receives only Messages requests.
 
-The operator upgrades the workers, then every Kinference replica,
-then the gateway, and adds the route for the Messages paths last. An
+The operator upgrades the workers and the `kinference-crds` chart,
+then every Kinference replica, then the gateway, and adds the route
+for the Messages paths last. The API server rejects a provider with
+`api: Anthropic` until the operator upgrades the chart. An
 older Kinference ignores `api_call` and reads a Messages body as a
 chat completion.
 
