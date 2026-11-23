@@ -147,24 +147,45 @@ async fn a_raw_body_is_forwarded_verbatim() {
     assert_eq!(requests[0].body, body);
 }
 
-/// A dedicated `render_url` is tried once; its failure never falls back to
-/// the workers.
+/// A `render_base_url` gets the chat render path appended and is tried
+/// once, with the workers left alone.
 #[tokio::test]
-async fn a_render_url_fails_fast() {
+async fn a_render_base_url_gets_the_chat_render_path() {
+    let service = FakeRender::start(Render::Tokens(vec![7])).await;
+    let worker = FakeRender::start(Render::Tokens(vec![1])).await;
+    let scrape = Arc::new(MetricsRegistry::new());
+    let workers = [(1, at(&worker, "10.0.0.1:8000"))];
+    let base = format!("{}/", service.base());
+    let body = br#"{"model":"m","messages":[]}"#;
+    let mut req = request(&workers, "m", raw());
+    req.render_base_url = Some(&base);
+    req.raw_body = Some(body);
+
+    let out = backend(&scrape).render(&req).await;
+    assert_eq!(out, TokenizeOutcome::Ok(vec![7]));
+    let requests = service.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/v1/chat/completions/render");
+    assert_eq!(requests[0].body, body);
+    assert_eq!(worker.calls(), 0);
+}
+
+/// A failing `render_base_url` never falls back to the workers.
+#[tokio::test]
+async fn a_render_base_url_fails_fast() {
     let failing = FakeRender::start(Render::Failing).await;
     let fine = FakeRender::start(Render::Tokens(vec![1])).await;
     let scrape = Arc::new(MetricsRegistry::new());
     let workers = [(1, at(&fine, "10.0.0.1:8000"))];
-    let url = format!("{}/render", failing.base());
     let mut req = request(&workers, "m", raw());
-    req.render_url = Some(&url);
+    req.render_base_url = Some(failing.base());
 
     let out = backend(&scrape).render(&req).await;
     let TokenizeOutcome::Unavailable { reason, attempts } = out else {
         panic!("{out:?}");
     };
     assert_eq!(attempts, 1);
-    assert!(reason.contains(&url), "{reason}");
+    assert!(reason.contains(failing.base()), "{reason}");
     assert_eq!(failing.calls(), 1);
     assert_eq!(fine.calls(), 0);
 }

@@ -62,6 +62,22 @@ fn duplicate_workerset_names_fail_validate() {
     assert!(err.to_string().contains("duplicate workerset name"));
 }
 
+/// `render_base_url` reaches the pool spec.
+#[test]
+fn render_base_url_reaches_the_pool_spec() {
+    let mut ws = workerset("p", "t", "svc");
+    ws["render_base_url"] = json!("http://render:8000");
+    let cfg = parse(json!({
+        "listen": "127.0.0.1:50051",
+        "profile": [{"name": "t"}],
+        "workerset": [ws],
+    }))
+    .expect("parses");
+    cfg.validate().expect("validates");
+    let spec = cfg.pool_specs().expect("specs").remove(0);
+    assert_eq!(spec.render_base_url.as_deref(), Some("http://render:8000"));
+}
+
 #[test]
 fn workerset_without_service_name_fails_validate() {
     let cfg = parse(json!({

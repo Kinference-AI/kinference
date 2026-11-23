@@ -124,7 +124,7 @@ pub fn desired_pools(
                 picker: profile.picker.clone(),
                 tokenize_mode: profile.tokenize.mode,
                 // Renders rotate across the pool's own workers.
-                render_url: None,
+                render_base_url: None,
                 discovery: DiscoveryConfig {
                     // Never `None`, which would watch every namespace and merge
                     // same-named Services into one pool.

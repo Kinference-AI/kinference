@@ -118,10 +118,11 @@ pub struct WorkerSetConfig {
     pub name: String,
     /// The profile supplying this set's tuning. Required.
     pub profile: String,
-    /// Dedicated `/render` URL (full URL including path). When unset, renders
-    /// rotate across the set's own workers.
+    /// Base URL of a render service. The render backend appends the render
+    /// path of the API call. When unset, renders rotate across the set's own
+    /// workers.
     #[serde(default)]
-    pub render_url: Option<String>,
+    pub render_base_url: Option<String>,
     #[serde(default)]
     pub discovery: DiscoveryConfig,
 }
@@ -218,7 +219,7 @@ impl Config {
                     predictor: profile.predictor.clone(),
                     picker: profile.picker.clone(),
                     tokenize_mode: profile.tokenize.mode,
-                    render_url: ws.render_url.clone(),
+                    render_base_url: ws.render_base_url.clone(),
                     discovery: ws.discovery.clone(),
                     // Only CRs can set these.
                     models_refresh_secs: None,

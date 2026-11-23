@@ -56,7 +56,7 @@ pub struct PoolSpec {
     pub predictor: PredictorConfig,
     pub picker: PickerConfig,
     pub tokenize_mode: TokenizeMode,
-    pub render_url: Option<String>,
+    pub render_base_url: Option<String>,
     pub discovery: DiscoveryConfig,
     /// Per-set `/v1/models` refresh interval
     /// (`spec.modelDiscovery.interval`). `None` uses the fleet-wide
@@ -189,9 +189,9 @@ pub struct Pool {
     pub pick_lock: Arc<Mutex<()>>,
     /// This pool's primary tokenization path (Render/Local/Compare).
     pub tokenize_mode: TokenizeMode,
-    /// This pool's dedicated `/render` URL, if configured. When `None`,
+    /// Base URL of this pool's render service, if configured. When `None`,
     /// render/compare rotate across the pool's own worker `http_url`s.
-    pub tokenize_render_url: Option<String>,
+    pub render_base_url: Option<String>,
     /// `/v1/models` scrape cadence for this pool's workers; `None` uses the
     /// fleet-wide setting.
     pub models_refresh_secs: Option<u64>,
@@ -243,7 +243,7 @@ impl Pool {
             inflight: Arc::new(InflightRegistry::new()),
             pick_lock: Arc::new(Mutex::new(())),
             tokenize_mode: spec.tokenize_mode,
-            tokenize_render_url: spec.render_url.clone(),
+            render_base_url: spec.render_base_url.clone(),
             models_refresh_secs: spec.models_refresh_secs,
             static_models: spec.static_models.clone(),
         }
@@ -263,7 +263,7 @@ impl Pool {
             predictor: spec.predictor.clone(),
             picker: spec.picker.clone(),
             tokenize_mode: spec.tokenize_mode,
-            tokenize_render_url: spec.render_url.clone(),
+            render_base_url: spec.render_base_url.clone(),
             models_refresh_secs: spec.models_refresh_secs,
             static_models: spec.static_models.clone(),
             // Shared, so the update keeps all live state.
@@ -643,7 +643,7 @@ pub fn test_spec(name: &str) -> PoolSpec {
         predictor: PredictorConfig::default(),
         picker: PickerConfig::default(),
         tokenize_mode: TokenizeMode::default(),
-        render_url: None,
+        render_base_url: None,
         discovery: DiscoveryConfig::default(),
         models_refresh_secs: None,
         static_models: None,
