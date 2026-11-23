@@ -2,11 +2,12 @@
 //! preprocessing as `/v1/chat/completions` (tools, multimodal placeholders,
 //! system-prompt defaulting, reasoning prefixes, `add_generation_prompt`)
 //! and stops before inference, so the token ids match what the engine
-//! hashes into its `BlockStored` events.
+//! hashes into its `BlockStored` events. `/v1/messages/render` does the
+//! same for a Messages body.
 //!
 //! A raw request body is forwarded verbatim, so fields kinference doesn't
-//! know about still reach vLLM; without one, a body is built from the
-//! [`TokenizeInput`].
+//! know about still reach vLLM; without one, a chat-completion body is
+//! built from the [`TokenizeInput`].
 
 use std::error::Error as StdError;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use futures::future::BoxFuture;
 use super::{ChatTemplateKwargs, TokenizeInput, TokenizeOutcome, TokenizeRequest, Tokenizer};
 use crate::error::Error;
 use kinference_fleet::scrape::MetricsRegistry;
+use kinference_policy::ApiCall;
 
 /// Maximum number of workers tried in sequence, freshest metrics first, so
 /// an outage doesn't try every worker on every request.
@@ -71,6 +73,7 @@ impl HttpRender {
     /// model share its tokenizer, so any of them returns the same tokens.
     pub(crate) async fn render(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
         let &TokenizeRequest {
+            api_call,
             render_base_url,
             workers,
             model,
@@ -78,13 +81,21 @@ impl HttpRender {
             raw_body,
             ..
         } = req;
+        let path = render_path(api_call);
+        // Only a chat-completion body can be built from `input`.
+        if raw_body.is_none() && api_call != ApiCall::ChatCompletions {
+            return TokenizeOutcome::Unavailable {
+                reason: format!("no body to post to {path}"),
+                attempts: 0,
+            };
+        }
         // A configured `render_base_url` (typically a Service) replaces the
         // per-worker rotation, keeping warm connections to one host. It fails
         // fast rather than falling back to individual workers.
         if let Some(url) = render_base_url {
             let started = std::time::Instant::now();
             let result = match raw_body {
-                Some(body) => render_via_vllm_raw(&self.client, url, body).await,
+                Some(body) => render_via_vllm_raw(&self.client, url, path, body).await,
                 None => render_via_vllm_structured(&self.client, url, model, input).await,
             };
             let render_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -138,7 +149,7 @@ impl HttpRender {
                 // Timed per call, logged at TRACE.
                 let render_start = std::time::Instant::now();
                 let result = match raw_body {
-                    Some(body) => render_via_vllm_raw(&self.client, url, body).await,
+                    Some(body) => render_via_vllm_raw(&self.client, url, path, body).await,
                     None => render_via_vllm_structured(&self.client, url, model, input).await,
                 };
                 let render_ms = render_start.elapsed().as_secs_f64() * 1000.0;
@@ -258,13 +269,22 @@ fn parse_render_response(json: &[u8]) -> Result<Vec<u32>, Error> {
     Ok(obj.token_ids)
 }
 
-/// POST `raw_body` verbatim to `{base}/v1/chat/completions/render`.
+/// The render route that takes the body of `api_call` unchanged.
+fn render_path(api_call: ApiCall) -> &'static str {
+    match api_call {
+        ApiCall::ChatCompletions => "/v1/chat/completions/render",
+        ApiCall::Messages | ApiCall::MessagesCountTokens => "/v1/messages/render",
+    }
+}
+
+/// POST `raw_body` verbatim to `{base}{path}`.
 async fn render_via_vllm_raw(
     client: &reqwest::Client,
     base: &str,
+    path: &str,
     raw_body: &[u8],
 ) -> Result<Vec<u32>, Error> {
-    let url = format!("{}/v1/chat/completions/render", base.trim_end_matches('/'));
+    let url = format!("{}{path}", base.trim_end_matches('/'));
     render_post_raw_at_url(client, &url, raw_body).await
 }
 

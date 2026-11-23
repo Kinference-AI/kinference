@@ -6,7 +6,8 @@
 //!   the background ([`compare`]).
 //!
 //! [`ByMode`] picks the backend by the pool's mode and records latency and
-//! failures once for every call.
+//! failures once for every call. A Messages request always uses `Render`,
+//! because only vLLM converts a Messages body to a prompt.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -108,7 +109,7 @@ pub(crate) trait Tokenizer: Send + Sync {
 }
 
 /// The tokenizer the service holds: every backend built once, chosen per
-/// request by the pool's mode. Records the duration and the `unavailable`
+/// request by the pool's mode and the API call. Records the duration and the `unavailable`
 /// path once per call, for every mode.
 pub(crate) struct ByMode {
     render: Arc<HttpRender>,
@@ -137,10 +138,14 @@ impl Tokenizer for ByMode {
     fn tokenize<'a>(&'a self, req: TokenizeRequest<'a>) -> BoxFuture<'a, TokenizeOutcome> {
         Box::pin(async move {
             let started = Instant::now();
-            let outcome = match req.mode {
-                TokenizeMode::Render => self.render.render(&req).await,
-                TokenizeMode::Local => self.local.encode_or_render(&req).await,
-                TokenizeMode::Compare => self.compare.render_then_compare(&req).await,
+            let outcome = match (req.api_call, req.mode) {
+                (ApiCall::ChatCompletions, TokenizeMode::Local) => {
+                    self.local.encode_or_render(&req).await
+                }
+                (ApiCall::ChatCompletions, TokenizeMode::Compare) => {
+                    self.compare.render_then_compare(&req).await
+                }
+                _ => self.render.render(&req).await,
             };
             self.prom
                 .record_tokenize_duration(req.api_call, started.elapsed().as_secs_f64() * 1000.0);
