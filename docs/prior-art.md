@@ -60,6 +60,20 @@ what it is and where its design decisions are written down.
 - Gateway API, `kubernetes-sigs/gateway-api`. The route and backend
   model that the gateway implements. GEPs in `geps/`. Bears on the
   CRDs and on how a route names a pool.
+- Envoy AI Gateway, `envoyproxy/ai-gateway`. An Envoy-based gateway
+  that translates between LLM API formats. Each backend declares its
+  schema in `api/v1alpha1/`. Bears on API formats, on the provider
+  `api` field and on metric labels.
+
+## API formats and telemetry
+
+- Anthropic API reference, `platform.claude.com/docs`. The Messages
+  schema, the stream events and the usage fields. Bears on the API
+  calls that the gateway names and on what the gateway reports.
+- OpenTelemetry GenAI semantic conventions,
+  `open-telemetry/semantic-conventions-genai`. Attribute names and
+  token accounting for LLM telemetry, in `docs/gen-ai/`. Bears on
+  metric labels and on the token counts in a report.
 
 ## Kubernetes in Rust
 
