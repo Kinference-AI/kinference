@@ -277,9 +277,22 @@ impl TestService {
             .expect("the service was built with policy")
     }
 
-    /// `pick_and_record` for tenant `acme`, with no client request id.
+    /// [`Self::pick_as`] for a chat completion.
     pub(crate) async fn pick(
         &self,
+        body: &[u8],
+        request_id: u64,
+        qos: Qos,
+        pool: Option<&PoolRef>,
+    ) -> PickAndRecordOutcome {
+        self.pick_as(ApiCall::ChatCompletions, body, request_id, qos, pool)
+            .await
+    }
+
+    /// `pick_and_record` for tenant `acme`, with no client request id.
+    pub(crate) async fn pick_as(
+        &self,
+        api_call: ApiCall,
         body: &[u8],
         request_id: u64,
         qos: Qos,
@@ -294,7 +307,7 @@ impl TestService {
                 request_id,
                 client_request_id: None,
                 qos,
-                api_call: ApiCall::ChatCompletions,
+                api_call,
                 pool_ref: pool,
                 identity: &identity,
             })
@@ -304,6 +317,13 @@ impl TestService {
     /// The router's metrics in Prometheus text form.
     pub(crate) fn metrics(&self) -> String {
         crate::tokenizer::test_support::exposition(&self.registry)
+    }
+
+    /// Every request the fake `/render` has answered, oldest first.
+    pub(crate) fn render_requests(&self) -> Vec<crate::tokenizer::test_support::Seen> {
+        self.render
+            .as_ref()
+            .map_or_else(Vec::new, FakeRender::requests)
     }
 
     /// How many requests the fake `/render` has answered.

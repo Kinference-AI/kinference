@@ -76,14 +76,26 @@ async fn a_pick_without_an_api_call_is_a_chat_completion_pick() {
     }
 }
 
-/// A Messages value or an unknown value fails with `INVALID_ARGUMENT`.
+/// A pick with `MESSAGES` counts as a Messages pick.
+#[tokio::test]
+async fn a_pick_with_messages_is_a_messages_pick() {
+    let (t, out) = pick_with_api_call(proto::ApiCall::Messages as i32).await;
+    let response = out.expect("a response").into_inner();
+    assert_ne!(response.response_id, 0, "{response:?}");
+
+    let out = t.metrics();
+    for line in [
+        r#"kinference_picks_total{api="messages",outcome="ok"} 1"#,
+        r#"kinference_pick_duration_ms_count{api="messages",outcome="ok"} 1"#,
+    ] {
+        assert!(out.contains(line), "missing {line}:\n{out}");
+    }
+}
+
+/// A token-count value or an unknown value fails with `INVALID_ARGUMENT`.
 #[tokio::test]
 async fn a_pick_with_an_unserved_api_call_is_invalid() {
-    for api_call in [
-        proto::ApiCall::Messages as i32,
-        proto::ApiCall::MessagesCountTokens as i32,
-        99,
-    ] {
+    for api_call in [proto::ApiCall::MessagesCountTokens as i32, 99] {
         let (t, out) = pick_with_api_call(api_call).await;
         let status = out.expect_err("a status");
         assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");

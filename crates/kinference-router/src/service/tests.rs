@@ -1153,8 +1153,8 @@ async fn an_unknown_model_yields_no_workers() {
     assert!(nonzero(&t.metrics(), "kinference_routed_requests_total").is_empty());
 }
 
-/// A body that is not an OpenAI chat request is refused with the reason, and
-/// nothing is reserved.
+/// A body that is not a JSON object with a `model` is refused with the
+/// reason, and nothing is reserved.
 #[tokio::test]
 async fn a_malformed_body_is_a_bad_request() {
     let t = ServiceBuilder::new()
@@ -1162,14 +1162,8 @@ async fn a_malformed_body_is_a_bad_request() {
         .build()
         .await;
     let cases: [(&[u8], &str); 4] = [
-        (
-            b"{not json",
-            "body is not a valid OpenAI ChatCompletionRequest: ",
-        ),
-        (
-            b"[1,2]",
-            "body is not a valid OpenAI ChatCompletionRequest: expected a JSON object",
-        ),
+        (b"{not json", "body is not valid JSON: "),
+        (b"[1,2]", "body is not a JSON object"),
         (
             br#"{"messages":[]}"#,
             "request body has an empty or absent `model`",
@@ -1544,4 +1538,123 @@ async fn start_builds_from_empty_handles() {
             .expect("a service");
     assert!(service.policy.is_none());
     let _server = crate::grpc::server(service);
+}
+
+const MESSAGES_BODY: &[u8] = br#"{"model":"qwen","max_tokens":8,"stream":true,"system":"be brief","messages":[{"role":"user","content":"hi"}]}"#;
+
+/// A Messages pick posts the pushed body unchanged to `/v1/messages/render`,
+/// reserves the prefix blocks of the token ids, and adds no `stream_options`
+/// to a streaming body.
+#[tokio::test]
+async fn a_messages_pick_renders_the_body_unchanged() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .build()
+        .await;
+
+    let out = t
+        .pick_as(ApiCall::Messages, MESSAGES_BODY, 1, Qos::Interactive, None)
+        .await;
+    let PickAndRecordOutcome::Ok { endpoint, body, .. } = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(endpoint, "10.0.0.1:8000");
+    assert!(body.is_empty(), "the pushed body goes out unchanged");
+
+    let seen = t.render_requests();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].path, "/v1/messages/render");
+    assert_eq!(seen[0].body, MESSAGES_BODY);
+    let dispatches = t.pools[0].inflight_prefixes.dispatches_for("10.0.0.1:8000");
+    assert_eq!(
+        dispatches[0].total_at_dispatch, 2,
+        "32 tokens in blocks of 16"
+    );
+    assert!(
+        t.svc.observations.labels.take(1).expect("labels").streaming,
+        "the labels remember that the request streams"
+    );
+}
+
+/// A Messages pick for an alias rewrites `model` alone, and `/render` sees
+/// the rewritten body.
+#[tokio::test]
+async fn a_messages_pick_for_an_alias_rewrites_only_the_model() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .alias("qwen-ws", "qwen", &["sonnet"])
+        .policy(serde_json::json!({"rules": []}))
+        .build()
+        .await;
+    let pool = TestService::pool_ref();
+    let pushed = br#"{"model":"sonnet","max_tokens":8,"stream":true,"messages":[]}"#;
+
+    let out = t
+        .pick_as(ApiCall::Messages, pushed, 1, Qos::Interactive, Some(&pool))
+        .await;
+    let PickAndRecordOutcome::Ok { body, .. } = out else {
+        panic!("{out:?}");
+    };
+    let mut expected: serde_json::Value = serde_json::from_slice(pushed).expect("a JSON body");
+    expected["model"] = "qwen".into();
+    let rewritten: serde_json::Value = serde_json::from_slice(&body).expect("a JSON body");
+    assert_eq!(rewritten, expected);
+    assert_eq!(t.render_requests()[0].body, body);
+}
+
+/// A Messages pick whose render fails is chosen on load alone.
+#[tokio::test]
+async fn a_messages_pick_with_a_failing_render_is_degraded() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .render(Render::Failing)
+        .build()
+        .await;
+
+    let out = t
+        .pick_as(ApiCall::Messages, MESSAGES_BODY, 1, Qos::Interactive, None)
+        .await;
+    let PickAndRecordOutcome::Degraded { endpoint, .. } = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(endpoint, "10.0.0.1:8000");
+    assert_eq!(t.render_requests()[0].path, "/v1/messages/render");
+
+    let out = t.metrics();
+    for line in [
+        r#"kinference_score_degraded_total{reason="tokenize"} 1"#,
+        r#"kinference_tokenize_total{api="messages",path="unavailable"} 1"#,
+    ] {
+        assert!(out.contains(line), "missing {line}:\n{out}");
+    }
+}
+
+/// A Messages pick for a model that only an Anthropic provider declares
+/// returns that provider, with the body naming the vendor's model.
+#[tokio::test]
+async fn a_messages_pick_returns_an_anthropic_provider() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .anthropic_provider(
+            "anthropic",
+            serde_json::json!([{"name": "vendor/claude", "aliases": ["claude"]}]),
+        )
+        .policy(serde_json::json!({"rules": [{"name": "to-cloud", "route": {
+            "consider": [{"type": "Provider"}],
+            "select": [{"order": ["anthropic"]}]}}]}))
+        .build()
+        .await;
+    let pool = TestService::pool_ref();
+    let pushed = br#"{"model":"claude","max_tokens":8,"stream":true,"messages":[]}"#;
+
+    let out = t
+        .pick_as(ApiCall::Messages, pushed, 1, Qos::Interactive, Some(&pool))
+        .await;
+    let PickAndRecordOutcome::Provider { body, .. } = out else {
+        panic!("{out:?}");
+    };
+    let rewritten: serde_json::Value = serde_json::from_slice(&body).expect("a JSON body");
+    assert_eq!(rewritten["model"], "vendor/claude");
+    assert!(rewritten.get("stream_options").is_none(), "{rewritten}");
+    assert_eq!(t.render_calls(), 0);
 }

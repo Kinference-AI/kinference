@@ -146,15 +146,14 @@ impl KinferenceService {
             Ok(v) => v,
             Err(e) => {
                 return Err(PickAndRecordOutcome::BadRequest {
-                    reason: format!("body is not a valid OpenAI ChatCompletionRequest: {e}"),
+                    reason: format!("body is not valid JSON: {e}"),
                     model: String::new(),
                 });
             }
         };
         if !obj.is_object() {
             return Err(PickAndRecordOutcome::BadRequest {
-                reason: "body is not a valid OpenAI ChatCompletionRequest: expected a JSON object"
-                    .to_string(),
+                reason: "body is not a JSON object".to_string(),
                 model: String::new(),
             });
         }
@@ -258,14 +257,35 @@ impl KinferenceService {
         }
 
         // The Pick-time body rewrites: the resolved model, and
-        // `stream_options.include_usage` for streaming requests. Only a changed
-        // body is re-serialized.
-        let mutated = crate::pick_body::apply_pick_body_mutations(&mut obj, force_model.as_deref());
+        // `stream_options.include_usage` for streaming chat completions. Only
+        // a changed body is re-serialized.
+        let mutated = crate::pick_body::apply_pick_body_mutations(
+            &mut obj,
+            force_model.as_deref(),
+            req.api_call,
+        );
         let body = WireBody {
             rewritten: mutated.then(|| {
                 serde_json::to_vec(&obj).expect("re-serializing a parsed JSON body cannot fail")
             }),
         };
+
+        let raw_body = Some(body.bytes(req.body).to_vec());
+        // Only `/render` reads a Messages body, so no chat input is taken.
+        if req.api_call != ApiCall::ChatCompletions {
+            return Ok(Resolved {
+                model,
+                requested_model,
+                serving,
+                body,
+                facts,
+                inputs: ScoreInput {
+                    input: Input::Messages(Vec::new()),
+                    chat_extras: ChatExtras::default(),
+                    raw_body,
+                },
+            });
+        }
 
         // The chat-template inputs, taken out of the tree now that it is
         // serialized. `/render` gets the outbound bytes so it sees what the
@@ -294,7 +314,7 @@ impl KinferenceService {
         let inputs = ScoreInput {
             input: Input::Messages(messages),
             chat_extras,
-            raw_body: Some(body.bytes(req.body).to_vec()),
+            raw_body,
         };
         Ok(Resolved {
             model,

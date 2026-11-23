@@ -30,7 +30,8 @@ fn model_rewrite_sets_model_and_reports_mutated() {
     let mut obj = json!({ "model": "auto", "messages": [] });
     assert!(apply_pick_body_mutations(
         &mut obj,
-        Some("google/gemma-4-12B-it")
+        Some("google/gemma-4-12B-it"),
+        ApiCall::ChatCompletions
     ));
     assert_eq!(obj["model"], json!("google/gemma-4-12B-it"));
 }
@@ -39,14 +40,22 @@ fn model_rewrite_sets_model_and_reports_mutated() {
 fn no_force_model_and_no_stream_is_a_noop() {
     let mut obj = json!({ "model": "m", "messages": [], "temperature": 0.5 });
     let before = obj.clone();
-    assert!(!apply_pick_body_mutations(&mut obj, None));
+    assert!(!apply_pick_body_mutations(
+        &mut obj,
+        None,
+        ApiCall::ChatCompletions
+    ));
     assert_eq!(obj, before);
 }
 
 #[test]
 fn stream_true_adds_include_usage() {
     let mut obj = json!({ "model": "m", "stream": true });
-    assert!(apply_pick_body_mutations(&mut obj, None));
+    assert!(apply_pick_body_mutations(
+        &mut obj,
+        None,
+        ApiCall::ChatCompletions
+    ));
     assert_eq!(obj["stream_options"]["include_usage"], json!(true));
 }
 
@@ -57,7 +66,11 @@ fn stream_true_preserves_existing_stream_options() {
         "stream": true,
         "stream_options": { "continuous_usage_stats": true }
     });
-    assert!(apply_pick_body_mutations(&mut obj, None));
+    assert!(apply_pick_body_mutations(
+        &mut obj,
+        None,
+        ApiCall::ChatCompletions
+    ));
     assert_eq!(obj["stream_options"]["include_usage"], json!(true));
     // Pre-existing sub-key must survive.
     assert_eq!(obj["stream_options"]["continuous_usage_stats"], json!(true));
@@ -70,35 +83,55 @@ fn include_usage_already_true_is_a_noop() {
         "stream": true,
         "stream_options": { "include_usage": true }
     });
-    assert!(!apply_pick_body_mutations(&mut obj, None));
+    assert!(!apply_pick_body_mutations(
+        &mut obj,
+        None,
+        ApiCall::ChatCompletions
+    ));
 }
 
 #[test]
 fn malformed_stream_options_is_replaced() {
     // A non-object stream_options is coerced to a proper object.
     let mut obj = json!({ "model": "m", "stream": true, "stream_options": "garbage" });
-    assert!(apply_pick_body_mutations(&mut obj, None));
+    assert!(apply_pick_body_mutations(
+        &mut obj,
+        None,
+        ApiCall::ChatCompletions
+    ));
     assert_eq!(obj["stream_options"]["include_usage"], json!(true));
 }
 
 #[test]
 fn stream_false_adds_nothing() {
     let mut obj = json!({ "model": "m", "stream": false });
-    assert!(!apply_pick_body_mutations(&mut obj, None));
+    assert!(!apply_pick_body_mutations(
+        &mut obj,
+        None,
+        ApiCall::ChatCompletions
+    ));
     assert!(obj.get("stream_options").is_none());
 }
 
 #[test]
 fn stream_absent_adds_nothing() {
     let mut obj = json!({ "model": "m" });
-    assert!(!apply_pick_body_mutations(&mut obj, None));
+    assert!(!apply_pick_body_mutations(
+        &mut obj,
+        None,
+        ApiCall::ChatCompletions
+    ));
     assert!(obj.get("stream_options").is_none());
 }
 
 #[test]
 fn both_mutations_apply_together() {
     let mut obj = json!({ "model": "auto", "stream": true });
-    assert!(apply_pick_body_mutations(&mut obj, Some("qwen")));
+    assert!(apply_pick_body_mutations(
+        &mut obj,
+        Some("qwen"),
+        ApiCall::ChatCompletions
+    ));
     assert_eq!(obj["model"], json!("qwen"));
     assert_eq!(obj["stream_options"]["include_usage"], json!(true));
 }
@@ -114,7 +147,11 @@ fn unknown_fields_survive_parse_mutate_serialize() {
         "some_vendor_ext": { "nested": [1, 2, 3] }
     });
     let mut obj = original.clone();
-    assert!(apply_pick_body_mutations(&mut obj, Some("concrete-model")));
+    assert!(apply_pick_body_mutations(
+        &mut obj,
+        Some("concrete-model"),
+        ApiCall::ChatCompletions
+    ));
     // Round-trip through bytes the way pick_and_record will.
     let bytes = serde_json::to_vec(&obj).unwrap();
     let roundtripped: Value = serde_json::from_slice(&bytes).unwrap();
@@ -129,7 +166,11 @@ fn unknown_fields_survive_parse_mutate_serialize() {
 #[test]
 fn non_object_body_is_left_unchanged() {
     let mut obj = json!([1, 2, 3]);
-    assert!(!apply_pick_body_mutations(&mut obj, Some("m")));
+    assert!(!apply_pick_body_mutations(
+        &mut obj,
+        Some("m"),
+        ApiCall::ChatCompletions
+    ));
     assert_eq!(obj, json!([1, 2, 3]));
 }
 
@@ -187,7 +228,7 @@ fn string_valued_stream_still_gets_include_usage() {
     ] {
         let mut obj: Value = serde_json::from_str(raw).unwrap();
         assert!(
-            apply_pick_body_mutations(&mut obj, None),
+            apply_pick_body_mutations(&mut obj, None, ApiCall::ChatCompletions),
             "{raw} should mutate"
         );
         assert_eq!(
@@ -196,4 +237,25 @@ fn string_valued_stream_still_gets_include_usage() {
             "{raw} should have had include_usage forced on"
         );
     }
+}
+
+/// A streaming Messages body gets the resolved model and no `stream_options`.
+#[test]
+fn a_messages_body_gets_no_stream_options() {
+    let mut obj = json!({ "model": "m", "stream": true, "max_tokens": 8 });
+    let before = obj.clone();
+    assert!(!apply_pick_body_mutations(
+        &mut obj,
+        None,
+        ApiCall::Messages
+    ));
+    assert_eq!(obj, before);
+
+    assert!(apply_pick_body_mutations(
+        &mut obj,
+        Some("qwen"),
+        ApiCall::Messages
+    ));
+    assert_eq!(obj["model"], json!("qwen"));
+    assert!(obj.get("stream_options").is_none(), "{obj}");
 }
