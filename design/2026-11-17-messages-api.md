@@ -92,22 +92,16 @@ The latch of the WARN line gains the API call in its key.
 
 ### One base URL for a render service
 
-A worker set in the config gains `render_base_url`. The render
-backend appends the render path of the API call to the base URL and
-calls the result once. `render_url` keeps its meaning for a
-chat-completion request. The config check rejects a worker set
-that has both fields.
+`render_base_url` replaces `render_url` on a worker set in the
+config. The render backend appends the render path of the API call to
+the base URL and calls the result once. Kinference ignores a
+`render_url` that a config file still has, as it ignores every
+unknown key of a worker set.
 
-A Messages render goes to one of three places.
+A render goes to one of two places, for every API call.
 
 - With `render_base_url`, the render goes to the base URL.
-- With `render_url` alone, Kinference derives the URL. When
-  `render_url` ends in `/v1/chat/completions/render`, Kinference
-  swaps that suffix for `/v1/messages/render`. For any other
-  `render_url`, Kinference makes no render call. The pick returns
-  `DEGRADED`, and Kinference logs one WARN line that names
-  `render_base_url`.
-- With neither field, the render goes to the set's own workers. Every
+- Without the field, the render goes to the set's own workers. Every
   worker set that an `InferenceWorkerSet` declares is in this case.
 
 ### A token-count pick
@@ -228,9 +222,10 @@ converter and replaced it two months later.
 render route would add a key. A render service serves every route on
 one host, so one base URL holds the same information.
 
-**Try the workers when `render_url` has another path.** A worker set
-with `render_url` never falls back to its workers today. A Messages
-pick keeps that rule.
+**Keep `render_url` beside `render_base_url`.** A Messages render
+would need a URL that Kinference derives from the suffix of
+`render_url`, and a degraded pick for every other `render_url`. A
+base URL covers every render service that serves vLLM's own paths.
 
 ## Prior art
 
@@ -292,7 +287,9 @@ needs an SSE event scanner for a Messages response.
 ## Operator-visible changes
 
 - Proto: `PickRequest.api_call`, and comments on the report messages.
-- Config: `render_base_url` on a worker set.
+- Config: `render_base_url` replaces `render_url` on a worker set.
+  The operator sets `render_base_url` to the former `render_url`
+  without the render path.
 - An `InferenceProvider` with `api: Anthropic` resolves. The CRD
   schema doesn't change.
 - The explain request of the admin policy API takes the API call.
@@ -307,27 +304,29 @@ needs an SSE event scanner for a Messages response.
 
 ## Compatibility and rollout
 
-An existing config file loads unchanged. A gateway on the previous
-protocol sends no `api_call`, and Kinference reads its requests as
-chat completions. An `InferenceProvider` with `api: Anthropic` moves
-from unresolved to resolved and receives only Messages requests.
+Every existing config file loads. A worker set that still has
+`render_url` renders through its own workers until the operator sets
+`render_base_url`. A gateway on the previous protocol sends no
+`api_call`, and Kinference reads its requests as chat completions.
+An `InferenceProvider` with `api: Anthropic` moves from unresolved
+to resolved and receives only Messages requests.
 
 The operator upgrades the workers, then every Kinference replica,
 then the gateway, and adds the route for the Messages paths last. An
 older Kinference ignores `api_call` and reads a Messages body as a
 chat completion.
 
-A rollback reverses the order. An older Kinference rejects a config
-file with `render_base_url`, so the operator removes the field first.
-An older Kinference also returns each Anthropic provider to
-unresolved.
+A rollback reverses the order. An older Kinference ignores
+`render_base_url` and renders through the set's own workers, so the
+operator restores `render_url` to keep the render service. An older
+Kinference also returns each Anthropic provider to unresolved.
 
 ## Break-down
 
-- Add `render_base_url` to a worker set. Done: a worker set with
-  `render_base_url` renders a chat-completion body at
-  `<base>/v1/chat/completions/render`, and the config check rejects a
-  worker set with both fields.
+- Replace `render_url` with `render_base_url` on a worker set. Done:
+  a worker set with `render_base_url` renders a chat-completion body
+  at `<base>/v1/chat/completions/render`, and a worker set with
+  `render_url` renders through its own workers.
 - Add `api_call` to `PickRequest`, with the report mapping and the
   `api` metric label. Done: the proto states the source of each
   report field in a Messages response. A pick with a Messages value
@@ -340,10 +339,9 @@ unresolved.
 - Route Messages requests. Done: a pick with `MESSAGES` returns a
   worker with cached-prefix overlap or an Anthropic provider, in a
   pool of any tokenize mode. The pulled body has no `stream_options`.
-  A failed render returns `DEGRADED`. A worker set whose `render_url`
-  ends in `/v1/chat/completions/render` renders at the derived URL. A
-  pick with
-  `MESSAGES_COUNT_TOKENS` still returns `INVALID_ARGUMENT`.
+  A failed render returns `DEGRADED`. A worker set with
+  `render_base_url` renders at `<base>/v1/messages/render`. A pick
+  with `MESSAGES_COUNT_TOKENS` still returns `INVALID_ARGUMENT`.
 - Route token-count requests on load alone. Done: a pick with
   `MESSAGES_COUNT_TOKENS` returns `OK`, makes no render call and
   leaves the in-flight gauges unchanged. A provider pick has an empty
