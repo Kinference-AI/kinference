@@ -569,26 +569,32 @@ fn prefix_match_skips_a_blank_model() {
 #[test]
 fn picks_are_counted_and_timed_by_outcome() {
     let m = metrics();
-    m.record_pick("ok", 3.0);
-    m.record_pick("ok", 30.0);
-    m.record_pick("no_workers", 0.6);
+    m.record_pick(ApiCall::ChatCompletions, "ok", 3.0);
+    m.record_pick(ApiCall::ChatCompletions, "ok", 30.0);
+    m.record_pick(ApiCall::ChatCompletions, "no_workers", 0.6);
     let out = m.render();
 
-    assert_line(&out, r#"kinference_picks_total{outcome="ok"} 2"#);
-    assert_line(&out, r#"kinference_picks_total{outcome="no_workers"} 1"#);
+    assert_line(
+        &out,
+        r#"kinference_picks_total{api="chat_completions",outcome="ok"} 2"#,
+    );
+    assert_line(
+        &out,
+        r#"kinference_picks_total{api="chat_completions",outcome="no_workers"} 1"#,
+    );
     // Latency is labelled by outcome because a rejected pick is fast and would
     // otherwise flatter the successful distribution.
     assert_line(
         &out,
-        r#"kinference_pick_duration_ms_bucket{outcome="ok",le="5"} 1"#,
+        r#"kinference_pick_duration_ms_bucket{api="chat_completions",outcome="ok",le="5"} 1"#,
     );
     assert_line(
         &out,
-        r#"kinference_pick_duration_ms_bucket{outcome="ok",le="50"} 2"#,
+        r#"kinference_pick_duration_ms_bucket{api="chat_completions",outcome="ok",le="50"} 2"#,
     );
     assert_line(
         &out,
-        r#"kinference_pick_duration_ms_count{outcome="no_workers"} 1"#,
+        r#"kinference_pick_duration_ms_count{api="chat_completions",outcome="no_workers"} 1"#,
     );
 }
 
@@ -606,20 +612,32 @@ fn pick_outcome_labels_match_the_wire_names() {
 fn tokenize_paths_partition_every_attempt() {
     let m = metrics();
     for _ in 0..3 {
-        m.record_tokenize_path("local");
-        m.record_tokenize_duration(2.0);
+        m.record_tokenize_path(ApiCall::ChatCompletions, "local");
+        m.record_tokenize_duration(ApiCall::ChatCompletions, 2.0);
     }
-    m.record_tokenize_path("http_fallback");
-    m.record_tokenize_duration(40.0);
-    m.record_tokenize_path("unavailable");
-    m.record_tokenize_duration(900.0);
+    m.record_tokenize_path(ApiCall::ChatCompletions, "http_fallback");
+    m.record_tokenize_duration(ApiCall::ChatCompletions, 40.0);
+    m.record_tokenize_path(ApiCall::ChatCompletions, "unavailable");
+    m.record_tokenize_duration(ApiCall::ChatCompletions, 900.0);
     let out = m.render();
 
-    assert_line(&out, r#"kinference_tokenize_total{path="local"} 3"#);
-    assert_line(&out, r#"kinference_tokenize_total{path="http_fallback"} 1"#);
-    assert_line(&out, r#"kinference_tokenize_total{path="unavailable"} 1"#);
+    assert_line(
+        &out,
+        r#"kinference_tokenize_total{api="chat_completions",path="local"} 3"#,
+    );
+    assert_line(
+        &out,
+        r#"kinference_tokenize_total{api="chat_completions",path="http_fallback"} 1"#,
+    );
+    assert_line(
+        &out,
+        r#"kinference_tokenize_total{api="chat_completions",path="unavailable"} 1"#,
+    );
     // One duration per attempt, so the histogram count is the path total.
-    assert_line(&out, "kinference_tokenize_duration_ms_count 5");
+    assert_line(
+        &out,
+        r#"kinference_tokenize_duration_ms_count{api="chat_completions"} 5"#,
+    );
 }
 
 /// Compare-mode agreement, including the divergence that silently breaks all
@@ -734,9 +752,15 @@ fn preinit_creates_every_closed_set_series_at_zero() {
     let out = metrics().render();
 
     let counters: [(&str, &[&str]); 6] = [
-        ("kinference_picks_total{outcome=", &PICK_OUTCOMES),
+        (
+            r#"kinference_picks_total{api="chat_completions",outcome="#,
+            &PICK_OUTCOMES,
+        ),
         ("kinference_score_degraded_total{reason=", &DEGRADE_REASONS),
-        ("kinference_tokenize_total{path=", &TOKENIZE_PATHS),
+        (
+            r#"kinference_tokenize_total{api="chat_completions",path="#,
+            &TOKENIZE_PATHS,
+        ),
         (
             "kinference_tokenize_compare_total{result=",
             &TOKENIZE_COMPARE_RESULTS,

@@ -205,14 +205,17 @@ impl LocalTokenizer {
     /// chat template, render or encode error) falls back.
     pub(crate) async fn encode_or_render(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
         let &TokenizeRequest {
-            model, ref input, ..
+            api_call,
+            model,
+            ref input,
+            ..
         } = req;
         let started = std::time::Instant::now();
         let result = self.encode(model, input).await;
         let render_ms = started.elapsed().as_secs_f64() * 1000.0;
         match result {
             Ok(tokens) => {
-                self.prom.record_tokenize_path("local");
+                self.prom.record_tokenize_path(api_call, "local");
                 tracing::trace!(
                     mode = "local",
                     model = %model,
@@ -233,7 +236,7 @@ impl LocalTokenizer {
                 let outcome = self.http.render(req).await;
                 // A double failure is counted by the dispatcher.
                 if matches!(outcome, TokenizeOutcome::Ok(_)) {
-                    self.prom.record_tokenize_path("http_fallback");
+                    self.prom.record_tokenize_path(api_call, "http_fallback");
                 }
                 outcome
             }

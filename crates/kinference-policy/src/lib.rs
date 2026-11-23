@@ -74,6 +74,32 @@ impl PoolRef {
     }
 }
 
+/// The API call of a request, as the caller of `Pick` named it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ApiCall {
+    #[default]
+    ChatCompletions,
+    Messages,
+    MessagesCountTokens,
+}
+
+impl ApiCall {
+    pub const ALL: [ApiCall; 3] = [
+        ApiCall::ChatCompletions,
+        ApiCall::Messages,
+        ApiCall::MessagesCountTokens,
+    ];
+
+    /// The value of the `api` metric label.
+    pub fn as_label(self) -> &'static str {
+        match self {
+            ApiCall::ChatCompletions => "chat_completions",
+            ApiCall::Messages => "messages",
+            ApiCall::MessagesCountTokens => "messages_count_tokens",
+        }
+    }
+}
+
 /// The pseudo-model meaning "kinference chooses the model". It is resolved to
 /// a concrete model by `choose_model_for_auto` before pool and endpoint
 /// selection; no worker serves this name.

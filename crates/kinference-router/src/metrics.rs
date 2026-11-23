@@ -6,13 +6,12 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use prometheus::{
-    Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, Registry, exponential_buckets,
+    HistogramVec, IntCounter, IntCounterVec, IntGauge, Registry, exponential_buckets,
 };
 use serde::Deserialize;
 
-use kinference_fleet::metrics::{
-    histogram, histogram_vec, int_counter, int_counter_vec, int_gauge,
-};
+use kinference_fleet::metrics::{histogram_vec, int_counter, int_counter_vec, int_gauge};
+use kinference_policy::ApiCall;
 
 /// `metrics`: labelling of the metrics kinference publishes.
 #[allow(dead_code)]
@@ -107,15 +106,16 @@ const ITL_LE_LABELS: [&str; 15] = [
 // are seeded at zero (see `preinit`). Open-valued families like
 // `{model,qos,tenant}` are not, to avoid inventing cardinality.
 
-/// `kinference_picks_total{outcome}` and `kinference_pick_duration_ms{outcome}`.
+/// `kinference_picks_total{api,outcome}` and
+/// `kinference_pick_duration_ms{api,outcome}`.
 /// Authoritative source: [`PickOutcome::as_label`].
 const PICK_OUTCOMES: [&str; 3] = ["ok", "bad_request", "no_workers"];
 
 /// `kinference_score_degraded_total{reason}`. Source: [`crate::service::Degraded::as_label`].
 const DEGRADE_REASONS: [&str; 2] = ["tokenize", "prefix_index"];
 
-/// `kinference_tokenize_total{path}`. Source: `crate::tokenizer`; exactly one
-/// per tokenize attempt.
+/// `kinference_tokenize_total{api,path}`. Source: `crate::tokenizer`; exactly
+/// one per tokenize attempt.
 const TOKENIZE_PATHS: [&str; 3] = ["local", "http_fallback", "unavailable"];
 
 /// `kinference_tokenize_compare_total{result}`. Source: `crate::tokenizer`.
@@ -259,14 +259,14 @@ pub struct RouterMetrics {
     body_aborted: IntCounterVec,
     // --- CRD routing policy. Not {model,qos}-labeled: these describe the
     // policy machinery, and `rule` is already the useful dimension.
-    /// `kinference_picks_total{outcome}`: every Pick() by wire outcome.
+    /// `kinference_picks_total{api,outcome}`: every Pick() by wire outcome.
     picks: IntCounterVec,
-    /// `kinference_pick_duration_ms{outcome}`: the router's own decision latency.
+    /// `kinference_pick_duration_ms{api,outcome}`: the router's own decision latency.
     pick_duration_ms: HistogramVec,
-    /// `kinference_tokenize_total{path}`: how each request got tokenized.
+    /// `kinference_tokenize_total{api,path}`: how each request got tokenized.
     tokenize_path: IntCounterVec,
-    /// `kinference_tokenize_duration_ms`: tokenize latency, all paths.
-    tokenize_duration_ms: Histogram,
+    /// `kinference_tokenize_duration_ms{api}`: tokenize latency, all paths.
+    tokenize_duration_ms: HistogramVec,
     /// `kinference_tokenize_compare_total{result}`: compare-mode agreement.
     tokenize_compare: IntCounterVec,
     /// `kinference_prefix_requested_blocks_total{model,qos}`: prompt blocks scored.
@@ -503,12 +503,12 @@ impl RouterMetrics {
         let picks = int_counter_vec(
             registry,
             "kinference_picks_total",
-            "Pick() calls by wire outcome: ok, bad_request (the body did not \
+            "Pick() calls by API call and wire outcome: ok, bad_request (the body did not \
                  parse or carried nothing to route on), no_workers (nothing serves \
                  the requested model). The router's top-line request outcome — \
                  distinct from kinference_policy_decisions_total, which is about CRD \
                  policy resolution rather than the result returned to the caller",
-            &["outcome"],
+            &["api", "outcome"],
         );
         let pick_duration_ms = histogram_vec(
             registry,
@@ -521,7 +521,7 @@ impl RouterMetrics {
             vec![
                 0.5, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0,
             ],
-            &["outcome"],
+            &["api", "outcome"],
         );
         let tokenize_path = int_counter_vec(
             registry,
@@ -531,9 +531,9 @@ impl RouterMetrics {
                  saved it), unavailable (both failed — the pick is DEGRADED and \
                  routes on load alone). Exactly one per tokenize attempt, so the \
                  three sum to the total",
-            &["path"],
+            &["api", "path"],
         );
-        let tokenize_duration_ms = histogram(
+        let tokenize_duration_ms = histogram_vec(
             registry,
             "kinference_tokenize_duration_ms",
             "Tokenize latency in milliseconds, across every path. On the Pick \
@@ -541,6 +541,7 @@ impl RouterMetrics {
             vec![
                 0.5, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0,
             ],
+            &["api"],
         );
         let tokenize_compare = int_counter_vec(
             registry,
@@ -694,14 +695,16 @@ impl RouterMetrics {
     /// nothing, so seeding `pick_duration_ms` would cost ~45 series for no
     /// benefit. `policy_rule_matches{rule}` has no bounded set to seed.
     fn preinit(&self) {
-        for outcome in PICK_OUTCOMES {
-            self.picks.with_label_values(&[outcome]);
+        for api in ApiCall::ALL.map(ApiCall::as_label) {
+            for outcome in PICK_OUTCOMES {
+                self.picks.with_label_values(&[api, outcome]);
+            }
+            for path in TOKENIZE_PATHS {
+                self.tokenize_path.with_label_values(&[api, path]);
+            }
         }
         for reason in DEGRADE_REASONS {
             self.score_degraded.with_label_values(&[reason]);
-        }
-        for path in TOKENIZE_PATHS {
-            self.tokenize_path.with_label_values(&[path]);
         }
         for result in TOKENIZE_COMPARE_RESULTS {
             self.tokenize_compare.with_label_values(&[result]);
@@ -744,22 +747,27 @@ impl RouterMetrics {
     ///
     /// `outcome` is the result handed back to the caller, distinct from the
     /// policy decision in `record_policy_decision`.
-    pub fn record_pick(&self, outcome: &str, latency_ms: f64) {
-        self.picks.with_label_values(&[outcome]).inc();
+    pub fn record_pick(&self, api: ApiCall, outcome: &str, latency_ms: f64) {
+        let api = api.as_label();
+        self.picks.with_label_values(&[api, outcome]).inc();
         self.pick_duration_ms
-            .with_label_values(&[outcome])
+            .with_label_values(&[api, outcome])
             .observe(latency_ms);
     }
 
     /// Which path tokenized one request: `local`, `http_fallback`, or
     /// `unavailable`. Exactly one per attempt.
-    pub fn record_tokenize_path(&self, path: &str) {
-        self.tokenize_path.with_label_values(&[path]).inc();
+    pub fn record_tokenize_path(&self, api: ApiCall, path: &str) {
+        self.tokenize_path
+            .with_label_values(&[api.as_label(), path])
+            .inc();
     }
 
     /// Tokenize latency, all paths.
-    pub fn record_tokenize_duration(&self, latency_ms: f64) {
-        self.tokenize_duration_ms.observe(latency_ms);
+    pub fn record_tokenize_duration(&self, api: ApiCall, latency_ms: f64) {
+        self.tokenize_duration_ms
+            .with_label_values(&[api.as_label()])
+            .observe(latency_ms);
     }
 
     /// Compare-mode local-vs-`/render` agreement: `match`, `divergence`, or

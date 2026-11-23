@@ -27,6 +27,7 @@ impl KinferenceService {
         // Passed explicitly, since `primary` may not exist (a provider-only
         // model).
         requested_model: &str,
+        api_call: ApiCall,
         spare: Option<ScoreInput>,
         attrs: kinference_policy::predicate::RequestAttrs,
     ) -> Result<PolicySelection, PickAndRecordOutcome> {
@@ -196,6 +197,7 @@ impl KinferenceService {
                                         &*self.tokenizer,
                                         &pool,
                                         &upstream,
+                                        api_call,
                                         input,
                                         HashMap::new(),
                                     )

@@ -68,6 +68,10 @@ pub enum Error {
         url: String,
         status: reqwest::StatusCode,
     },
+    /// `PickRequest.api_call` is not a value of the proto enum.
+    UnknownApiCall(i32),
+    /// The router does not route this API call.
+    UnsupportedApiCall(kinference_policy::ApiCall),
 }
 
 impl Error {
@@ -112,6 +116,10 @@ impl std::fmt::Display for Error {
             Error::Json { path, .. } => write!(f, "parsing {} as JSON", path.display()),
             Error::Hub { url, .. } => write!(f, "GET {url}"),
             Error::HubStatus { url, status } => write!(f, "HTTP {status} fetching {url}"),
+            Error::UnknownApiCall(value) => write!(f, "unknown api_call {value}"),
+            Error::UnsupportedApiCall(api_call) => {
+                write!(f, "api_call {} is not supported", api_call.as_label())
+            }
         }
     }
 }
@@ -125,7 +133,9 @@ impl std::error::Error for Error {
             | Error::RenderShape(_)
             | Error::NoChatTemplate { .. }
             | Error::MissingFile(_)
-            | Error::HubStatus { .. } => None,
+            | Error::HubStatus { .. }
+            | Error::UnknownApiCall(_)
+            | Error::UnsupportedApiCall(_) => None,
             Error::RenderDecode { source, .. } => Some(source),
             Error::TokenizerFile { source, .. } => Some(&**source),
             Error::TokenizerHub { source, .. } => Some(&**source),

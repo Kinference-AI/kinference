@@ -42,8 +42,9 @@ failures as gRPC status directly:
   RESOURCE_EXHAUSTED (8)  per-request or server-wide buffer budget exceeded, or
                           a single chunk over the per-message decode limit
   DEADLINE_EXCEEDED (4)   PushBody idle longer than the inter-chunk budget
-  INVALID_ARGUMENT (3)    malformed request; Pick with body_stream_id = 0; a
-                          PushBody whose byte count disagrees with its
+  INVALID_ARGUMENT (3)    malformed request; Pick with body_stream_id = 0; Pick
+                          with an unknown or unserved api_call; a PushBody
+                          whose byte count disagrees with its
                           `kinference-declared-length`
 
 Conformance:
@@ -117,6 +118,19 @@ message PickRequest {
   QosClass qos_class = 4;
 
   string tenant = 5;
+
+  ApiCall api_call = 6;
+}
+
+/*
+The API call of the client's request. The caller derives the value from the
+path of the client's request, without the query. The server never derives the
+value from the body.
+*/
+enum ApiCall {
+  CHAT_COMPLETIONS = 0; // every other path
+  MESSAGES = 1; // a path that ends in `/v1/messages`
+  MESSAGES_COUNT_TOKENS = 2; // a path that ends in `/v1/messages/count_tokens`
 }
 
 message PickResponse {
@@ -163,6 +177,13 @@ message ProviderTarget {
   string path = 2;
 }
 
+/*
+The caller sends exactly one ReportFirstToken for each dispatched pick.
+
+For a Messages response, the first token is the first `content_block_delta`
+event, or the end of a response that has no such event. An `error` event before
+the first token is an upstream failure with upstream_status 500.
+*/
 message ReportFirstTokenRequest {
   uint64 response_id = 1;
   uint32 observed_ttft_ms = 2;
@@ -173,6 +194,20 @@ message ReportFirstTokenResponse {
   bool acknowledged = 1;
 }
 
+/*
+For a Messages response, the caller fills the fields as follows. An absent or
+null `usage` field counts as 0.
+
+  model              the response's `model`
+  prompt_tokens      `input_tokens` + `cache_read_input_tokens` +
+                     `cache_creation_input_tokens`
+  cached_tokens      `cache_read_input_tokens`; unset when absent or null
+  completion_tokens  `output_tokens`
+
+In a stream, the counts come from `message_start`, and a count in a later
+`message_delta` that is not null replaces the earlier count. An inter-token gap
+is the time between two `content_block_delta` events.
+*/
 message ReportFinalTokenRequest {
   uint64 response_id = 1;
   string model = 2;

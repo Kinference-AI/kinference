@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use dynamo_kv_router::indexer::KvIndexerInterface;
 use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
-use kinference_policy::AUTO_MODEL;
+use kinference_policy::{AUTO_MODEL, ApiCall};
 
 use crate::body_store::{self, Bodies, BodyLimits};
 use crate::error::Error;
@@ -572,6 +572,20 @@ pub(crate) enum Input {
     Tokens(Vec<u32>),
 }
 
+/// The proto `ApiCall` value as an [`ApiCall`]. `Err` for a value that the
+/// router does not route.
+pub(crate) fn api_call_from_proto(value: i32) -> Result<ApiCall, Error> {
+    use crate::proto::ApiCall as Wire;
+    match Wire::try_from(value) {
+        Ok(Wire::ChatCompletions) => Ok(ApiCall::ChatCompletions),
+        Ok(Wire::Messages) => Err(Error::UnsupportedApiCall(ApiCall::Messages)),
+        Ok(Wire::MessagesCountTokens) => {
+            Err(Error::UnsupportedApiCall(ApiCall::MessagesCountTokens))
+        }
+        Err(_) => Err(Error::UnknownApiCall(value)),
+    }
+}
+
 /// What one `(pool, model)` is scored from.
 #[derive(Clone)]
 pub(crate) struct ScoreInput {
@@ -766,6 +780,7 @@ mod lifecycle;
 mod policy_driver;
 mod scoring;
 
+pub(crate) use lifecycle::PickInput;
 pub(crate) use scoring::Scoring;
 
 #[cfg(test)]

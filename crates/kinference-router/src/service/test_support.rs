@@ -283,7 +283,15 @@ impl TestService {
             tenant: "acme".into(),
         };
         self.svc
-            .pick_and_record(body, request_id, None, qos, pool, &identity)
+            .pick_and_record(PickInput {
+                body,
+                request_id,
+                client_request_id: None,
+                qos,
+                api_call: ApiCall::ChatCompletions,
+                pool_ref: pool,
+                identity: &identity,
+            })
             .await
     }
 

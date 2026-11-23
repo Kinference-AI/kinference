@@ -618,7 +618,10 @@ async fn raw_input_encodes_from_the_mount() {
         .encode_or_render(&request(&[], "m", TokenizeInput::Raw("hello world".into())))
         .await;
     assert_eq!(out, TokenizeOutcome::Ok(vec![99, 0, 1]));
-    assert!(exposition(&registry).contains(r#"kinference_tokenize_total{path="local"} 1"#));
+    assert!(
+        exposition(&registry)
+            .contains(r#"kinference_tokenize_total{api="chat_completions",path="local"} 1"#)
+    );
 }
 
 /// Chat input renders the mounted template, which emits `<bos>` itself.
@@ -652,11 +655,11 @@ async fn a_model_without_a_chat_template_falls_back_to_render() {
     assert_eq!(fake.calls(), 1);
     let out = exposition(&registry);
     assert!(
-        out.contains(r#"kinference_tokenize_total{path="http_fallback"} 1"#),
+        out.contains(r#"kinference_tokenize_total{api="chat_completions",path="http_fallback"} 1"#),
         "{out}"
     );
     assert!(
-        out.contains(r#"kinference_tokenize_total{path="local"} 0"#),
+        out.contains(r#"kinference_tokenize_total{api="chat_completions",path="local"} 0"#),
         "{out}"
     );
     assert!(!local.failed.first("m"), "warned once for the model");
@@ -680,7 +683,11 @@ async fn a_double_failure_is_unavailable() {
         matches!(out, TokenizeOutcome::Unavailable { .. }),
         "{out:?}"
     );
-    assert!(exposition(&registry).contains(r#"kinference_tokenize_total{path="http_fallback"} 0"#));
+    assert!(
+        exposition(&registry).contains(
+            r#"kinference_tokenize_total{api="chat_completions",path="http_fallback"} 0"#
+        )
+    );
 }
 
 /// Warm-up loads the model so a later decode needs no load.

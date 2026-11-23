@@ -13,14 +13,16 @@ use super::*;
 use crate::observations::PendingObservation;
 
 /// What `Pick()` carried, read by every step of the pick.
-struct PickRequest<'a> {
+pub(crate) struct PickInput<'a> {
     /// The pushed body, forwarded unchanged unless a step rewrites it.
-    body: &'a [u8],
-    request_id: u64,
-    client_request_id: Option<&'a str>,
-    qos: Qos,
-    pool_ref: Option<&'a kinference_policy::PoolRef>,
-    identity: &'a kinference_policy::RequestIdentity,
+    pub body: &'a [u8],
+    /// Minted by the caller; see `mint_response_id`.
+    pub request_id: u64,
+    pub client_request_id: Option<&'a str>,
+    pub qos: Qos,
+    pub api_call: ApiCall,
+    pub pool_ref: Option<&'a kinference_policy::PoolRef>,
+    pub identity: &'a kinference_policy::RequestIdentity,
 }
 
 /// Step 1. The body as a JSON tree, with what the later steps read from it.
@@ -117,27 +119,7 @@ enum Selected {
 impl KinferenceService {
     /// The full pick path behind gRPC `Pick()`. A refusal returns from the
     /// step that found it and writes no state.
-    ///
-    /// The caller mints `request_id` (see `mint_response_id`), so the same id
-    /// flows through pending-observation lookup and log correlation.
-    pub(crate) async fn pick_and_record(
-        &self,
-        body: &[u8],
-        request_id: u64,
-        client_request_id: Option<&str>,
-        qos: Qos,
-        pool_ref: Option<&kinference_policy::PoolRef>,
-        identity: &kinference_policy::RequestIdentity,
-    ) -> PickAndRecordOutcome {
-        let req = PickRequest {
-            body,
-            request_id,
-            client_request_id,
-            qos,
-            pool_ref,
-            identity,
-        };
-
+    pub(crate) async fn pick_and_record(&self, req: PickInput<'_>) -> PickAndRecordOutcome {
         let parsed = match Self::parse(&req) {
             Ok(p) => p,
             Err(out) => return out,
@@ -157,7 +139,7 @@ impl KinferenceService {
 
     /// Step 1. `Err` is a `BadRequest`: not JSON, not an object, or no
     /// `model`.
-    fn parse(req: &PickRequest<'_>) -> Result<Parsed, PickAndRecordOutcome> {
+    fn parse(req: &PickInput<'_>) -> Result<Parsed, PickAndRecordOutcome> {
         // A JSON tree, rewritten in place later (see `crate::pick_body`).
         // Not a typed struct, which would drop unknown fields.
         let obj: serde_json::Value = match serde_json::from_slice(req.body) {
@@ -206,7 +188,7 @@ impl KinferenceService {
     /// no pool and no provider serves the model.
     fn resolve_model(
         &self,
-        req: &PickRequest<'_>,
+        req: &PickInput<'_>,
         parsed: Parsed,
     ) -> Result<Resolved, PickAndRecordOutcome> {
         let Parsed {
@@ -327,7 +309,7 @@ impl KinferenceService {
     /// Step 3. Score the first serving pool, then the rest with the first's
     /// tokens. Records `score_degraded`. Never refuses: a pool with no ready
     /// worker yields no group, and a policy may still place the request.
-    async fn score_groups(&self, req: &PickRequest<'_>, resolved: Resolved) -> Scored {
+    async fn score_groups(&self, req: &PickInput<'_>, resolved: Resolved) -> Scored {
         let Resolved {
             model,
             requested_model,
@@ -345,7 +327,14 @@ impl KinferenceService {
         if let Some(first) = serving.first() {
             let (outcome, score_side) = self
                 .scoring
-                .score_workers(&*self.tokenizer, first, &model, inputs, HashMap::new())
+                .score_workers(
+                    &*self.tokenizer,
+                    first,
+                    &model,
+                    req.api_call,
+                    inputs,
+                    HashMap::new(),
+                )
                 .await;
             match outcome {
                 ScoreOutcome::Ok(resp) => groups.push(ScoredGroup {
@@ -386,7 +375,14 @@ impl KinferenceService {
                 };
                 let (outcome, side) = self
                     .scoring
-                    .score_workers(&*self.tokenizer, pool, &model, input, HashMap::new())
+                    .score_workers(
+                        &*self.tokenizer,
+                        pool,
+                        &model,
+                        req.api_call,
+                        input,
+                        HashMap::new(),
+                    )
                     .await;
                 let scores = match outcome {
                     ScoreOutcome::Ok(r) => r.scores,
@@ -424,7 +420,7 @@ impl KinferenceService {
     /// rewritten; no state is written.
     async fn select(
         &self,
-        req: &PickRequest<'_>,
+        req: &PickInput<'_>,
         scored: Scored,
     ) -> Result<Selected, PickAndRecordOutcome> {
         let Scored {
@@ -491,7 +487,7 @@ impl KinferenceService {
         // Re-bind to the winning group, whose pool's scores and prefix hashes
         // the critical section uses.
         let (group, endpoint) = match self
-            .policy_select(pref, store, winner, &model, spare, attrs)
+            .policy_select(pref, store, winner, &model, req.api_call, spare, attrs)
             .await
         {
             // An off-cluster destination: nothing pool-scoped applies. Rewrite
@@ -563,7 +559,7 @@ impl KinferenceService {
     /// Step 5. Apply the pick. Local: the critical section under the pool's
     /// `pick_lock`, then the pending stash and the routed counter. Provider:
     /// the label stash and the routed counter. Only here is state written.
-    fn commit(&self, req: &PickRequest<'_>, selected: Selected) -> PickAndRecordOutcome {
+    fn commit(&self, req: &PickInput<'_>, selected: Selected) -> PickAndRecordOutcome {
         let (group, forced_endpoint, body, streaming, degraded) = match selected {
             Selected::Local {
                 group,
@@ -900,7 +896,7 @@ impl KinferenceService {
     /// policy rank.
     fn policy_for<'a>(
         &'a self,
-        req: &PickRequest<'a>,
+        req: &PickInput<'a>,
     ) -> Option<(
         &'a kinference_policy::PoolRef,
         &'a Arc<kinference_policy::store::PolicyStore>,

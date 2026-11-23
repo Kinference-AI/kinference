@@ -447,6 +447,7 @@ async fn scoring_cuts_the_prompt_at_each_workers_block_size() {
             &*t.svc.tokenizer,
             pool,
             "qwen",
+            ApiCall::ChatCompletions,
             ScoreInput::tokens(tokens),
             HashMap::new(),
         )
@@ -493,6 +494,7 @@ async fn scoring_counts_no_blocks_when_no_worker_has_a_block_size() {
             &*t.svc.tokenizer,
             &pool,
             "qwen",
+            ApiCall::ChatCompletions,
             ScoreInput::tokens((1..=128).collect()),
             HashMap::new(),
         )
@@ -564,8 +566,16 @@ async fn select(
         requested_model: model.into(),
         ..Default::default()
     };
-    svc.policy_select(&pref, store, Some(start), model, spare, attrs)
-        .await
+    svc.policy_select(
+        &pref,
+        store,
+        Some(start),
+        model,
+        ApiCall::ChatCompletions,
+        spare,
+        attrs,
+    )
+    .await
 }
 
 /// When every matching rule falls through, the unmatched route serves the
@@ -663,7 +673,15 @@ async fn select_aliased(
     };
     let out = t
         .svc
-        .policy_select(&pref, t.store(), Some(start), "qwen", spare, attrs)
+        .policy_select(
+            &pref,
+            t.store(),
+            Some(start),
+            "qwen",
+            ApiCall::ChatCompletions,
+            spare,
+            attrs,
+        )
         .await;
     (t, out)
 }
@@ -729,6 +747,7 @@ async fn dropping_an_alias_drops_a_provider_model_under_every_name() {
             t.store(),
             Some(start),
             "qwen",
+            ApiCall::ChatCompletions,
             None,
             attrs,
         )
@@ -1254,7 +1273,7 @@ async fn degraded_pick(render: Render) {
     let out = t.metrics();
     for line in [
         r#"kinference_score_degraded_total{reason="tokenize"} 1"#,
-        r#"kinference_tokenize_total{path="unavailable"} 1"#,
+        r#"kinference_tokenize_total{api="chat_completions",path="unavailable"} 1"#,
         r#"kinference_routed_requests_total{destination="qwen-ws",tenant="default",type="Local"} 1"#,
     ] {
         assert!(out.contains(line), "missing {line}:\n{out}");
