@@ -39,7 +39,7 @@ use self::local::{LocalTokenizeConfig, LocalTokenizer};
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct TokenizeConfig {
     /// Idle keep-alive connections kept per host. Set it at or above peak
-    /// concurrency when all renders go to a single `render_url`. `None` means
+    /// concurrency when all renders go to a single `render_base_url`. `None` means
     /// 16.
     #[serde(default)]
     pub pool_max_idle_per_host: Option<usize>,
@@ -90,8 +90,8 @@ pub(crate) enum TokenizeOutcome {
 pub(crate) struct TokenizeRequest<'a> {
     /// The pool's mode. Read by [`ByMode`]; a backend serves one mode.
     pub mode: TokenizeMode,
-    /// A dedicated `/render` URL; `None` rotates across `workers`.
-    pub render_url: Option<&'a str>,
+    /// Base URL of a render service; `None` rotates across `workers`.
+    pub render_base_url: Option<&'a str>,
     pub workers: &'a [(u64, WorkerEntry)],
     pub model: &'a str,
     pub input: TokenizeInput,

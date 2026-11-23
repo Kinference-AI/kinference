@@ -28,7 +28,7 @@ const FALLBACK_MAX_ATTEMPTS: usize = 3;
 /// attempt. When it elapses, scoring degrades.
 const TOTAL_DEADLINE: Duration = Duration::from_secs(5);
 
-/// Tokenization over `/render`: a dedicated URL tried once, else the pool's
+/// Tokenization over `/render`: a render service tried once, else the pool's
 /// workers in turn, freshest scrape first, at most three, within one
 /// deadline.
 pub(crate) struct HttpRender {
@@ -44,7 +44,7 @@ impl HttpRender {
     /// Settings mirror the Gateway API Inference Extension EPP's. vLLM speaks
     /// HTTP/1.1 only, so force it; without multiplexing that means several
     /// connections per host (`pool_max_idle_per_host`; raise to peak
-    /// concurrency with a single `render_url`). `pool_idle_timeout = 90s`
+    /// concurrency with a single `render_base_url`). `pool_idle_timeout = 90s`
     /// matches the EPP and AWS NLB idle tolerance; `tcp_keepalive` detects
     /// half-closed connections.
     pub(crate) fn new(
@@ -71,21 +71,21 @@ impl HttpRender {
     /// model share its tokenizer, so any of them returns the same tokens.
     pub(crate) async fn render(&self, req: &TokenizeRequest<'_>) -> TokenizeOutcome {
         let &TokenizeRequest {
-            render_url,
+            render_base_url,
             workers,
             model,
             ref input,
             raw_body,
             ..
         } = req;
-        // A configured `render_url` (typically a Service) replaces the
+        // A configured `render_base_url` (typically a Service) replaces the
         // per-worker rotation, keeping warm connections to one host. It fails
         // fast rather than falling back to individual workers.
-        if let Some(url) = render_url {
+        if let Some(url) = render_base_url {
             let started = std::time::Instant::now();
             let result = match raw_body {
-                Some(body) => render_post_raw_at_url(&self.client, url, body).await,
-                None => render_structured_at_url(&self.client, url, model, input).await,
+                Some(body) => render_via_vllm_raw(&self.client, url, body).await,
+                None => render_via_vllm_structured(&self.client, url, model, input).await,
             };
             let render_ms = started.elapsed().as_secs_f64() * 1000.0;
             match result {
@@ -103,7 +103,7 @@ impl HttpRender {
                 Err(e) => {
                     let err = e.chain();
                     return TokenizeOutcome::Unavailable {
-                        reason: format!("render_url={url} failed: {err}"),
+                        reason: format!("render_base_url={url} failed: {err}"),
                         attempts: 1,
                     };
                 }
@@ -268,8 +268,7 @@ async fn render_via_vllm_raw(
     render_post_raw_at_url(client, &url, raw_body).await
 }
 
-/// POST `raw_body` verbatim to a fully-qualified `/render` URL (a worker
-/// set's `render_url`), without appending a path.
+/// POST `raw_body` verbatim to a fully-qualified `/render` URL.
 async fn render_post_raw_at_url(
     client: &reqwest::Client,
     url: &str,
@@ -286,51 +285,6 @@ async fn render_post_raw_at_url(
         .send()
         .await
         .map_err(render)?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(Error::RenderStatus {
-            status,
-            body: body.trim().to_string(),
-        });
-    }
-    let bytes = resp.bytes().await.map_err(render)?;
-    parse_render_response(&bytes)
-}
-
-/// [`render_via_vllm_structured`] for a fully-qualified `url`, which must be
-/// the right endpoint for the input's chat or completion variant.
-async fn render_structured_at_url(
-    client: &reqwest::Client,
-    url: &str,
-    model: &str,
-    input: &TokenizeInput,
-) -> Result<Vec<u32>, Error> {
-    let render = |source| Error::Render {
-        url: url.to_string(),
-        source,
-    };
-    let body = match input {
-        TokenizeInput::Raw(prompt) => serde_json::json!({
-            "model": model,
-            "prompt": prompt,
-        }),
-        TokenizeInput::Chat {
-            messages,
-            kwargs,
-            tools,
-            tool_choice,
-            add_generation_prompt,
-        } => build_chat_render_body(
-            model,
-            messages,
-            kwargs,
-            tools,
-            tool_choice.as_ref(),
-            *add_generation_prompt,
-        ),
-    };
-    let resp = client.post(url).json(&body).send().await.map_err(render)?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();

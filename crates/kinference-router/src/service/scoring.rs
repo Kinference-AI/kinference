@@ -156,7 +156,7 @@ impl Scoring {
             TokenSource::NeedsTokenize(tok_input) => {
                 let tok_req = crate::tokenizer::TokenizeRequest {
                     mode: pool.tokenize_mode,
-                    render_url: pool.tokenize_render_url.as_deref(),
+                    render_base_url: pool.render_base_url.as_deref(),
                     workers: &workers,
                     model,
                     input: tok_input,

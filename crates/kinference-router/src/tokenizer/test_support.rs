@@ -139,7 +139,7 @@ pub(crate) fn request<'a>(
 ) -> TokenizeRequest<'a> {
     TokenizeRequest {
         mode: TokenizeMode::Render,
-        render_url: None,
+        render_base_url: None,
         workers,
         model,
         input,
