@@ -46,7 +46,7 @@ first in this repository, the gateway repository or `kubectl`.
    A required field that you cannot fill gets a sentence under its
    heading that says so. Put YAML, logs and commands in fenced blocks.
 7. Check every sentence of the draft against the prose rules in
-   AGENTS.md and rewrite each sentence that fails.
+   docs/prose.md and rewrite each sentence that fails.
 8. Show the title and body. File the issue only when the user says
    so, with `gh issue create --title "..." --label <the form's
    labels> --body-file -` and the body on stdin.

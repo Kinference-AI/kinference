@@ -79,7 +79,7 @@ name itself.
     docs/local-development.md that exercise the change. Validation
     says what the run showed, or says that you did not run it.
 11. Check every sentence of the draft against the prose rules in
-    AGENTS.md and rewrite each sentence that fails.
+    docs/prose.md and rewrite each sentence that fails.
 12. Show the title and body. On a yes:
     `gh pr create --base <base branch> --title "..." --body-file -`
     with the body on stdin, or `gh pr edit` in update mode.
