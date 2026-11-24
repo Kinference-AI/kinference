@@ -539,9 +539,9 @@ impl KinferenceService {
 }
 
 /// Project a scraped sample onto a [`WorkerScore`], for both `score_workers`
-/// and [`Scoring::degraded_response`].
+/// and [`Scoring::load_only_response`].
 ///
-/// The prefix-cache values are parameters because the degraded path zeroes
+/// The prefix-cache values are parameters because a load-only pick zeroes
 /// them while still reporting real load.
 fn worker_score(
     entry: &WorkerEntry,
@@ -578,16 +578,14 @@ pub(crate) enum Input {
     Tokens(Vec<u32>),
 }
 
-/// The proto `ApiCall` value as an [`ApiCall`]. `Err` for a value that the
-/// router does not route.
+/// The proto `ApiCall` value as an [`ApiCall`]. `Err` for a value that is
+/// not in the proto enum.
 pub(crate) fn api_call_from_proto(value: i32) -> Result<ApiCall, Error> {
     use crate::proto::ApiCall as Wire;
     match Wire::try_from(value) {
         Ok(Wire::ChatCompletions) => Ok(ApiCall::ChatCompletions),
         Ok(Wire::Messages) => Ok(ApiCall::Messages),
-        Ok(Wire::MessagesCountTokens) => {
-            Err(Error::UnsupportedApiCall(ApiCall::MessagesCountTokens))
-        }
+        Ok(Wire::MessagesCountTokens) => Ok(ApiCall::MessagesCountTokens),
         Err(_) => Err(Error::UnknownApiCall(value)),
     }
 }
@@ -733,8 +731,8 @@ pub(crate) enum TokenSource {
 
 /// Outcome of [`KinferenceService::pick_and_record`]. For `Ok` and `Degraded`
 /// the side effects (inflight increment, inflight-prefix insert,
-/// pending-observation stash) have been applied; the error outcomes write no
-/// state.
+/// pending-observation stash) have been applied; the error outcomes and a
+/// local token-count pick write no state.
 #[derive(Debug)]
 pub(crate) enum PickAndRecordOutcome {
     /// Successful pick. The caller dispatches to `endpoint` and later reports

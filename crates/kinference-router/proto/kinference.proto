@@ -43,9 +43,8 @@ failures as gRPC status directly:
                           a single chunk over the per-message decode limit
   DEADLINE_EXCEEDED (4)   PushBody idle longer than the inter-chunk budget
   INVALID_ARGUMENT (3)    malformed request; Pick with body_stream_id = 0; Pick
-                          with an unknown or unserved api_call; a PushBody
-                          whose byte count disagrees with its
-                          `kinference-declared-length`
+                          with an unknown api_call; a PushBody whose byte
+                          count disagrees with its `kinference-declared-length`
 
 Conformance:
 
@@ -130,7 +129,13 @@ value from the body.
 enum ApiCall {
   CHAT_COMPLETIONS = 0; // every other path
   MESSAGES = 1; // a path that ends in `/v1/messages`
-  MESSAGES_COUNT_TOKENS = 2; // a path that ends in `/v1/messages/count_tokens`
+  /*
+  A path that ends in `/v1/messages/count_tokens`. The caller sends
+  ReportFirstToken when the response ends, and no ReportFinalToken. For a local
+  destination the server keeps no record of the pick, so ReportFirstToken
+  returns acknowledged = false.
+  */
+  MESSAGES_COUNT_TOKENS = 2;
 }
 
 message PickResponse {
@@ -172,7 +177,7 @@ message ProviderTarget {
   Path to dispatch on, REPLACING the path the client sent; empty means leave it
   alone. It is joined AFTER any path prefix the GatewayBackend's baseURL
   carries. Always starts with '/', and may carry a query string, which likewise
-  replaces the client's.
+  replaces the client's. Always empty for MESSAGES_COUNT_TOKENS.
   */
   string path = 2;
 }

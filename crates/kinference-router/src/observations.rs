@@ -16,6 +16,7 @@ use crate::metrics::RouterMetrics;
 use crate::picker::WaitPrediction;
 use crate::picker::WorkerScore;
 use kinference_fleet::profile::{PickerConfig, PredictorConfig};
+use kinference_policy::ApiCall;
 
 /// Quality-of-service class for a request, mapped from the proto
 /// `PickRequest.QosClass`. Used as the `qos` label on `/metrics` series.
@@ -245,8 +246,10 @@ pub struct RequestMeta {
     ///
     /// Here rather than in `PendingObservation`, which is built from
     /// per-endpoint scoring state a provider doesn't have, and because this
-    /// map lives until `ReportFinalToken`.
+    /// map lives until the last report: `ReportFinalToken`, or
+    /// `ReportFirstToken` for a token-count pick.
     pub provider: Option<kinference_policy::engine::ObjectKey>,
+    pub api_call: ApiCall,
 }
 
 /// What `RequestLabels` knows about a pick that went off-cluster.
@@ -256,6 +259,7 @@ pub struct ProviderPickLabels {
     /// Whether the caller asked for streaming. Decides whether its reported
     /// first-token time is a real TTFT or the whole response.
     pub streaming: bool,
+    pub api_call: ApiCall,
 }
 
 pub struct RequestLabels {
@@ -293,6 +297,7 @@ impl RequestLabels {
                 provider,
                 model: m.model.clone(),
                 streaming: m.streaming,
+                api_call: m.api_call,
             })
         })
     }
@@ -352,6 +357,7 @@ impl Observations {
     /// `qos`, `tenant` and `streaming` describe the request, not the
     /// provider. `streaming` lets [`Self::record_provider_first_token`] tell
     /// a real TTFT from a non-streaming response's total latency.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_provider_pick(
         &self,
         response_id: u64,
@@ -360,6 +366,7 @@ impl Observations {
         qos: Qos,
         tenant: &str,
         streaming: bool,
+        api_call: ApiCall,
     ) {
         self.labels.insert(
             response_id,
@@ -371,6 +378,7 @@ impl Observations {
                 streaming,
                 picked_at: Instant::now(),
                 provider: Some(provider.clone()),
+                api_call,
             },
         );
     }
@@ -392,6 +400,10 @@ impl Observations {
         let Some(labels) = self.labels.provider_pick_for(response_id) else {
             return false;
         };
+        // No `ReportFinalToken` follows a token-count response.
+        if labels.api_call == ApiCall::MessagesCountTokens {
+            self.labels.take(response_id);
+        }
         let (provider, model) = (labels.provider, labels.model);
         use kinference_policy::provider_health::FailureKind;
         let failure = match upstream_status {
@@ -406,7 +418,9 @@ impl Observations {
         };
         match failure {
             Some((kind, detail)) => self.note_provider_failure(&provider, kind, &detail),
-            None if labels.streaming => {
+            // A token-count response has no first token: the caller reports
+            // its total latency.
+            None if labels.streaming && labels.api_call != ApiCall::MessagesCountTokens => {
                 self.provider_health
                     .record_success(&provider, observed_ttft_ms as f32);
                 // Success only: a failure's time is time-to-error.

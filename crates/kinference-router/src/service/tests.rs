@@ -1658,3 +1658,238 @@ async fn a_messages_pick_returns_an_anthropic_provider() {
     assert!(rewritten.get("stream_options").is_none(), "{rewritten}");
     assert_eq!(t.render_calls(), 0);
 }
+
+const COUNT_TOKENS_BODY: &[u8] = br#"{"model":"qwen","messages":[{"role":"user","content":"hi"}]}"#;
+
+/// A token-count pick is `Ok` on load alone and makes no render call,
+/// whatever the render service would answer.
+#[tokio::test]
+async fn a_token_count_pick_makes_no_render_call() {
+    for render in [Render::Tokens((1..=32).collect()), Render::Failing] {
+        let t = ServiceBuilder::new()
+            .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+            .render(render)
+            .build()
+            .await;
+
+        let out = t
+            .pick_as(
+                ApiCall::MessagesCountTokens,
+                COUNT_TOKENS_BODY,
+                1,
+                Qos::Interactive,
+                None,
+            )
+            .await;
+        let PickAndRecordOutcome::Ok { endpoint, body, .. } = out else {
+            panic!("{out:?}");
+        };
+        assert_eq!(endpoint, "10.0.0.1:8000");
+        assert!(body.is_empty(), "the pushed body goes out unchanged");
+        assert_eq!(t.render_calls(), 0);
+
+        let out = t.metrics();
+        for family in [
+            "kinference_tokenize_total",
+            "kinference_score_degraded_total",
+            "kinference_predicted_ttft_ms_count",
+        ] {
+            assert!(nonzero(&out, family).is_empty(), "{family}:\n{out}");
+        }
+    }
+}
+
+/// Two worker sets serving one model: a token-count pick goes to the less
+/// loaded one, and neither set gets a render call.
+#[tokio::test]
+async fn a_token_count_pick_across_two_pools_makes_no_render_call() {
+    let t = ServiceBuilder::new()
+        .pool("busy-ws", "qwen", &["10.0.0.1:8000"])
+        .pool("idle-ws", "qwen", &["10.0.0.2:8000"])
+        .build()
+        .await;
+    t.svc.scoring.scrape.record_sample_for_test(
+        1,
+        kinference_fleet::scrape::MetricsSample {
+            waiting: 64,
+            scraped_at: Some(Instant::now()),
+            ..Default::default()
+        },
+    );
+
+    let out = t
+        .pick_as(
+            ApiCall::MessagesCountTokens,
+            COUNT_TOKENS_BODY,
+            1,
+            Qos::Interactive,
+            None,
+        )
+        .await;
+    let PickAndRecordOutcome::Ok { endpoint, .. } = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(endpoint, "10.0.0.2:8000");
+    assert_eq!(t.render_calls(), 0);
+}
+
+/// A token-count pick gives the policy no input token count, so a rule on
+/// `inputTokens` doesn't match and the request stays local.
+#[tokio::test]
+async fn a_token_count_pick_matches_no_input_tokens_rule() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .anthropic_provider(
+            "anthropic",
+            serde_json::json!([{"name": "vendor/qwen", "aliases": ["qwen"]}]),
+        )
+        .policy(serde_json::json!({"rules": [{"name": "short-to-cloud",
+            "matches": [{"inputTokens": {"lessThan": 100}}],
+            "route": {"consider": [{"type": "Provider"}], "select": [{"order": ["anthropic"]}]}}]}))
+        .build()
+        .await;
+    let pool = TestService::pool_ref();
+
+    let out = t
+        .pick_as(
+            ApiCall::MessagesCountTokens,
+            COUNT_TOKENS_BODY,
+            1,
+            Qos::Interactive,
+            Some(&pool),
+        )
+        .await;
+    assert!(matches!(out, PickAndRecordOutcome::Ok { .. }), "{out:?}");
+    assert_eq!(t.render_calls(), 0);
+
+    let out = t.metrics();
+    assert!(nonzero(&out, "kinference_policy_rule_matches_total").is_empty());
+    assert!(nonzero(&out, "kinference_predicted_ttft_ms_count").is_empty());
+}
+
+/// A local token-count pick reserves no in-flight state and leaves nothing
+/// for the reports, and the next pick sees an idle worker.
+#[tokio::test]
+async fn a_local_token_count_pick_writes_no_state() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .build()
+        .await;
+
+    let out = t
+        .pick_as(
+            ApiCall::MessagesCountTokens,
+            COUNT_TOKENS_BODY,
+            1,
+            Qos::Interactive,
+            None,
+        )
+        .await;
+    assert!(matches!(out, PickAndRecordOutcome::Ok { .. }), "{out:?}");
+
+    assert!(t.svc.observations.pending.is_empty());
+    assert!(t.svc.observations.labels.take(1).is_none());
+    assert_eq!(t.pools[0].inflight.get("10.0.0.1:8000"), 0);
+    assert_eq!(t.pools[0].inflight_prefixes.len(), 0);
+
+    let out = t.metrics();
+    assert!(nonzero(&out, "kinference_prefix_requested_blocks_total").is_empty());
+    let routed = r#"kinference_routed_requests_total{destination="qwen-ws",tenant="default",type="Local"} 1"#;
+    assert!(out.contains(routed), "missing {routed}:\n{out}");
+}
+
+/// The provider pick for `api_call` from a service whose only destination
+/// for `claude` is an Anthropic provider that declares `spec.path`.
+async fn provider_pick_with_a_path(api_call: ApiCall) -> (TestService, ProviderPick) {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .anthropic_provider(
+            "anthropic",
+            serde_json::json!([{"name": "vendor/claude", "aliases": ["claude"]}]),
+        )
+        .provider_path("/v1/messages")
+        .policy(serde_json::json!({"rules": [{"name": "to-cloud", "route": {
+            "consider": [{"type": "Provider"}],
+            "select": [{"order": ["anthropic"]}]}}]}))
+        .build()
+        .await;
+    let pool = TestService::pool_ref();
+    let pushed = br#"{"model":"claude","messages":[]}"#;
+
+    let out = t
+        .pick_as(api_call, pushed, 1, Qos::Interactive, Some(&pool))
+        .await;
+    let PickAndRecordOutcome::Provider { pick, .. } = out else {
+        panic!("{out:?}");
+    };
+    (t, pick)
+}
+
+/// A provider token-count pick has no path, where a Messages pick has the
+/// path that the provider declares.
+#[tokio::test]
+async fn a_provider_token_count_pick_has_no_path() {
+    let (_, pick) = provider_pick_with_a_path(ApiCall::Messages).await;
+    assert_eq!(pick.path.as_deref(), Some("/v1/messages"));
+
+    let (t, pick) = provider_pick_with_a_path(ApiCall::MessagesCountTokens).await;
+    assert_eq!(pick.path, None);
+    assert_eq!(t.render_calls(), 0);
+}
+
+/// The first-token report releases the record of a provider token-count
+/// pick, where the record of a Messages pick stays for the final report.
+#[tokio::test]
+async fn the_first_token_report_releases_a_provider_token_count_pick() {
+    let (t, _) = provider_pick_with_a_path(ApiCall::Messages).await;
+    assert!(t.svc.observations.record_provider_first_token(1, 40, 200));
+    assert!(t.svc.observations.labels.provider_pick_for(1).is_some());
+
+    let (t, _) = provider_pick_with_a_path(ApiCall::MessagesCountTokens).await;
+    assert!(t.svc.observations.labels.provider_pick_for(1).is_some());
+    assert!(t.svc.observations.record_provider_first_token(1, 40, 200));
+    assert!(t.svc.observations.labels.provider_pick_for(1).is_none());
+}
+
+/// A provider token-count pick whose body asks for a stream records no
+/// time to first token, because the report has the total latency.
+#[tokio::test]
+async fn a_provider_token_count_pick_records_no_ttft() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .anthropic_provider(
+            "anthropic",
+            serde_json::json!([{"name": "vendor/claude", "aliases": ["claude"]}]),
+        )
+        .policy(serde_json::json!({"rules": [{"name": "to-cloud", "route": {
+            "consider": [{"type": "Provider"}],
+            "select": [{"order": ["anthropic"]}]}}]}))
+        .build()
+        .await;
+    let pool = TestService::pool_ref();
+    let pushed = br#"{"model":"claude","stream":true,"messages":[]}"#;
+
+    let out = t
+        .pick_as(
+            ApiCall::MessagesCountTokens,
+            pushed,
+            1,
+            Qos::Interactive,
+            Some(&pool),
+        )
+        .await;
+    assert!(
+        matches!(out, PickAndRecordOutcome::Provider { .. }),
+        "{out:?}"
+    );
+    assert!(t.svc.observations.record_provider_first_token(1, 40, 200));
+
+    let provider = kinference_policy::engine::ObjectKey::new("default", "anthropic");
+    assert_eq!(
+        t.svc
+            .observations
+            .provider_health
+            .observed_ttft_ms(&provider),
+        None
+    );
+}

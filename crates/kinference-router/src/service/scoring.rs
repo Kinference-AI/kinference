@@ -2,7 +2,7 @@
 //!
 //! `Scoring` is the read side of a pick: which pools serve a model, and the
 //! registry each worker's load and prefix overlap are read from. It makes no
-//! routing decision; `lifecycle` does. `degraded_response` is the same with
+//! routing decision; `lifecycle` does. `load_only_response` is the same with
 //! the prefix-cache values zeroed.
 
 use super::*;
@@ -77,9 +77,9 @@ impl Scoring {
         }
     }
 
-    /// Build a degraded `ScoreResponse` when tokenize is unavailable: load
-    /// fields as usual, `total_blocks` and `matched_blocks` zeroed.
-    pub(crate) fn degraded_response(&self, workers: &[(u64, WorkerEntry)]) -> ScoreResponse {
+    /// Scores without a prefix-cache signal: load fields as usual,
+    /// `total_blocks` and `matched_blocks` zeroed.
+    pub(crate) fn load_only_response(&self, workers: &[(u64, WorkerEntry)]) -> ScoreResponse {
         let mut scores = Vec::with_capacity(workers.len());
         for (num, entry) in workers {
             let sample = self.scrape.latest(*num);
@@ -116,6 +116,11 @@ impl Scoring {
             .collect();
         if workers.is_empty() {
             return (ScoreOutcome::NoWorkers, side);
+        }
+        // A token-count request never reaches the model, so the prompt's
+        // prefix has no cache to match.
+        if api_call == ApiCall::MessagesCountTokens {
+            return (ScoreOutcome::Ok(self.load_only_response(&workers)), side);
         }
 
         let ScoreInput {
@@ -185,7 +190,7 @@ impl Scoring {
                                 "tokenize failed; picking on load alone"
                             );
                         }
-                        let degraded = self.degraded_response(&workers);
+                        let degraded = self.load_only_response(&workers);
                         return (
                             ScoreOutcome::Unavailable(degraded, Degraded::Tokenize),
                             side,
@@ -255,7 +260,7 @@ impl Scoring {
                             "prefix index query failed; picking on load alone"
                         );
                     }
-                    let degraded = self.degraded_response(&workers);
+                    let degraded = self.load_only_response(&workers);
                     return (
                         ScoreOutcome::Unavailable(degraded, Degraded::PrefixIndex),
                         side,

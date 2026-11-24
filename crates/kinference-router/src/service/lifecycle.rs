@@ -270,7 +270,9 @@ impl KinferenceService {
             }),
         };
 
-        let raw_body = Some(body.bytes(req.body).to_vec());
+        // A token-count pick makes no render call, so nothing reads the body.
+        let raw_body =
+            (req.api_call != ApiCall::MessagesCountTokens).then(|| body.bytes(req.body).to_vec());
         // Only `/render` reads a Messages body, so no chat input is taken.
         if req.api_call != ApiCall::ChatCompletions {
             return Ok(Resolved {
@@ -462,9 +464,12 @@ impl KinferenceService {
         // policy's `candidates_for` when a policy is in play, otherwise this.
         // Recording in both would double-count. A request naming an unresolved
         // pool records none, but is counted under
-        // `kinference_policy_decisions_total`.
+        // `kinference_policy_decisions_total`. A token-count request records
+        // none, because it has no first token.
         let policy = self.policy_for(req);
-        let winner = best_group(groups, policy.is_none().then_some(&*self.prom));
+        let token_count = req.api_call == ApiCall::MessagesCountTokens;
+        let record_predictions = policy.is_none() && !token_count;
+        let winner = best_group(groups, record_predictions.then_some(&*self.prom));
 
         // No pool named, or policy disabled: the ranking decided, and providers
         // are unreachable.
@@ -497,7 +502,10 @@ impl KinferenceService {
             // The prompt's token count, from scoring. `None` when nothing
             // local was scored, so `inputTokens` predicates and context-window
             // fitting don't apply.
-            input_tokens: winner.as_ref().map(|w| w.side.tokens.len() as i64),
+            input_tokens: winner
+                .as_ref()
+                .filter(|_| !token_count)
+                .map(|w| w.side.tokens.len() as i64),
             max_tokens: facts.max_tokens,
             qos: Some(req.qos.as_label().to_string()),
             tenant: req.identity.tenant.clone(),
@@ -513,7 +521,12 @@ impl KinferenceService {
             // An off-cluster destination: nothing pool-scoped applies. Rewrite
             // the body to the vendor's model name; `commit` holds an observation
             // for the reported TTFT.
-            Ok(PolicySelection::Provider(pick)) => {
+            Ok(PolicySelection::Provider(mut pick)) => {
+                // One `spec.path` can't name both Messages paths, so the
+                // caller keeps the path that the client sent.
+                if token_count {
+                    pick.path = None;
+                }
                 if !body.name_model(req.body, &pick.upstream_model) {
                     tracing::error!(
                         to_model = %pick.upstream_model,
@@ -600,6 +613,7 @@ impl KinferenceService {
                     req.qos,
                     &req.identity.tenant,
                     streaming,
+                    req.api_call,
                 );
                 self.prom.record_routed(
                     &req.identity.tenant,
@@ -627,9 +641,13 @@ impl KinferenceService {
         let pick_lock = &*pool.pick_lock;
         let inflight_enabled = picker_cfg.inflight_tracking;
 
+        // A token-count request never reaches the model, so the pick reads
+        // the in-flight state as load and reserves none.
+        let reserve = req.api_call != ApiCall::MessagesCountTokens;
+
         // The critical section: pick and state mutation.
         let chosen_endpoint: String;
-        let pending: PendingObservation;
+        let pending: Option<PendingObservation>;
         {
             // Recover from poisoning: one panic would otherwise break every
             // later pick on this pool. The mutex guards `()`, only ordering the
@@ -813,7 +831,7 @@ impl KinferenceService {
             // `chosen.matched_blocks` is the layered value (it was overwritten
             // above with radix match plus in-flight prefill credit), while
             // `chosen_kv_blocks` is the raw tree match for the same pick.
-            if degraded.is_none() {
+            if degraded.is_none() && reserve {
                 self.prom.record_prefix_match(
                     &model,
                     req.qos.as_label(),
@@ -823,70 +841,77 @@ impl KinferenceService {
                 );
             }
 
-            let chosen_clone = chosen.clone();
-            pending = PendingObservation {
-                request_id: req.request_id,
-                workerset: pool.name.clone(),
-                profile: pool.profile.clone(),
-                inflight: crate::observations::InflightHandles::of(&pool),
-                picked_at: score_now,
-                chosen_worker: chosen_clone,
-                prediction,
-                q_inflight: chosen_inflight,
-                kv_blocks: chosen_kv_blocks,
-                inflight_workload_blocks: chosen_q_breakdown.inflight_workload_blocks,
-                q_ms_constant: chosen_q_breakdown.q_ms_constant,
-                q_ms_workload: chosen_q_breakdown.q_ms_workload,
-                inflight_overlap_blocks: chosen_overlap_per_dispatch,
-                expected_overlap_alpha,
-                predictor_cfg: predictor_cfg.clone(),
-                picker_cfg: picker_cfg.clone(),
-                external_request_id: req.client_request_id.map(|s| s.to_string()),
-                replication_fired,
-                model: model.clone(),
-                streaming,
-                qos: req.qos,
-                tenant: req.identity.tenant.clone(),
-            };
-            // For ReportFinalToken; the record above is consumed earlier, at
-            // ReportFirstToken.
-            self.observations.labels.insert(
-                req.request_id,
-                RequestMeta {
+            if reserve {
+                let chosen_clone = chosen.clone();
+                pending = Some(PendingObservation {
+                    request_id: req.request_id,
+                    workerset: pool.name.clone(),
+                    profile: pool.profile.clone(),
+                    inflight: crate::observations::InflightHandles::of(&pool),
+                    picked_at: score_now,
+                    chosen_worker: chosen_clone,
+                    prediction,
+                    q_inflight: chosen_inflight,
+                    kv_blocks: chosen_kv_blocks,
+                    inflight_workload_blocks: chosen_q_breakdown.inflight_workload_blocks,
+                    q_ms_constant: chosen_q_breakdown.q_ms_constant,
+                    q_ms_workload: chosen_q_breakdown.q_ms_workload,
+                    inflight_overlap_blocks: chosen_overlap_per_dispatch,
+                    expected_overlap_alpha,
+                    predictor_cfg: predictor_cfg.clone(),
+                    picker_cfg: picker_cfg.clone(),
+                    external_request_id: req.client_request_id.map(|s| s.to_string()),
+                    replication_fired,
                     model: model.clone(),
+                    streaming,
                     qos: req.qos,
                     tenant: req.identity.tenant.clone(),
-                    streaming,
-                    picked_at: score_now,
-                    // A local pick, so there is no provider to attribute
-                    // feedback to.
-                    provider: None,
-                },
-            );
+                });
+                // For ReportFinalToken; the record above is consumed earlier, at
+                // ReportFirstToken.
+                self.observations.labels.insert(
+                    req.request_id,
+                    RequestMeta {
+                        model: model.clone(),
+                        qos: req.qos,
+                        tenant: req.identity.tenant.clone(),
+                        streaming,
+                        picked_at: score_now,
+                        // A local pick, so there is no provider to attribute
+                        // feedback to.
+                        provider: None,
+                        api_call: req.api_call,
+                    },
+                );
 
-            if inflight_enabled {
-                inflight.inc(&chosen.endpoint);
+                if inflight_enabled {
+                    inflight.inc(&chosen.endpoint);
+                }
+                let chosen_hashes_u64 = chosen
+                    .block_size
+                    .and_then(|b| score_side.hashes_by_block_size.get(&b))
+                    .cloned()
+                    .unwrap_or_default();
+                let chosen_hashes_set: std::collections::HashSet<u64> =
+                    chosen_hashes_u64.into_iter().collect();
+                let chosen_uncached = chosen.total_blocks.saturating_sub(chosen.matched_blocks);
+                pool.inflight_prefixes.insert(
+                    req.request_id,
+                    chosen.endpoint.clone(),
+                    chosen_hashes_set,
+                    chosen_uncached,
+                    chosen.total_blocks,
+                );
+            } else {
+                pending = None;
             }
-            let chosen_hashes_u64 = chosen
-                .block_size
-                .and_then(|b| score_side.hashes_by_block_size.get(&b))
-                .cloned()
-                .unwrap_or_default();
-            let chosen_hashes_set: std::collections::HashSet<u64> =
-                chosen_hashes_u64.into_iter().collect();
-            let chosen_uncached = chosen.total_blocks.saturating_sub(chosen.matched_blocks);
-            pool.inflight_prefixes.insert(
-                req.request_id,
-                chosen.endpoint.clone(),
-                chosen_hashes_set,
-                chosen_uncached,
-                chosen.total_blocks,
-            );
 
             chosen_endpoint = chosen.endpoint.clone();
         }
 
-        self.observations.pending.insert(pending);
+        if let Some(pending) = pending {
+            self.observations.pending.insert(pending);
+        }
         // The bare name, as `backend.name` spells it; a CRD worker set's
         // `pool.name` is `namespace/name`.
         self.prom.record_routed(
