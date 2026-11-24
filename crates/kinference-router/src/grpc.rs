@@ -96,7 +96,7 @@ impl Picker for KinferenceService {
     /// `pick_and_record`, and re-key the body to the minted `response_id` for
     /// `PullBody`.
     ///
-    /// `Err(Status)` only for a body-lookup failure or a rejected `api_call`;
+    /// `Err(Status)` only for a body-lookup failure or an unknown `api_call`;
     /// routing outcomes come back in the `PickResponse`.
     async fn pick(&self, request: Request<PickRequest>) -> Result<Response<PickResponse>, Status> {
         let req = request.into_inner();

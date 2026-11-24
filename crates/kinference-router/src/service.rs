@@ -578,16 +578,14 @@ pub(crate) enum Input {
     Tokens(Vec<u32>),
 }
 
-/// The proto `ApiCall` value as an [`ApiCall`]. `Err` for a value that the
-/// router does not route.
+/// The proto `ApiCall` value as an [`ApiCall`]. `Err` for a value that is
+/// not in the proto enum.
 pub(crate) fn api_call_from_proto(value: i32) -> Result<ApiCall, Error> {
     use crate::proto::ApiCall as Wire;
     match Wire::try_from(value) {
         Ok(Wire::ChatCompletions) => Ok(ApiCall::ChatCompletions),
         Ok(Wire::Messages) => Ok(ApiCall::Messages),
-        Ok(Wire::MessagesCountTokens) => {
-            Err(Error::UnsupportedApiCall(ApiCall::MessagesCountTokens))
-        }
+        Ok(Wire::MessagesCountTokens) => Ok(ApiCall::MessagesCountTokens),
         Err(_) => Err(Error::UnknownApiCall(value)),
     }
 }

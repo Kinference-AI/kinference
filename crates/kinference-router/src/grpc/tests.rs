@@ -92,20 +92,69 @@ async fn a_pick_with_messages_is_a_messages_pick() {
     }
 }
 
-/// A token-count value or an unknown value fails with `INVALID_ARGUMENT`.
+/// A pick with `MESSAGES_COUNT_TOKENS` counts as a token-count pick, and
+/// its first-token report finds no record.
 #[tokio::test]
-async fn a_pick_with_an_unserved_api_call_is_invalid() {
-    for api_call in [proto::ApiCall::MessagesCountTokens as i32, 99] {
-        let (t, out) = pick_with_api_call(api_call).await;
-        let status = out.expect_err("a status");
-        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
-        assert_eq!(t.svc.bodies.store.stats().1, 0, "the body is released");
-        assert!(t.svc.observations.pending.is_empty());
-        let out = t.metrics();
-        assert!(
-            !out.lines()
-                .any(|l| l.starts_with("kinference_picks_total{") && !l.ends_with(" 0")),
-            "{out}"
-        );
+async fn a_pick_with_messages_count_tokens_is_a_token_count_pick() {
+    let (t, out) = pick_with_api_call(proto::ApiCall::MessagesCountTokens as i32).await;
+    let response = out.expect("a response").into_inner();
+    assert_ne!(response.response_id, 0, "{response:?}");
+    assert_eq!(response.outcome, proto::pick_response::Outcome::Ok as i32);
+    assert_eq!(t.render_calls(), 0);
+    assert_eq!(t.pools[0].inflight.get("10.0.0.1:8000"), 0);
+
+    let out = t.metrics();
+    for line in [
+        r#"kinference_picks_total{api="messages_count_tokens",outcome="ok"} 1"#,
+        r#"kinference_pick_duration_ms_count{api="messages_count_tokens",outcome="ok"} 1"#,
+    ] {
+        assert!(out.contains(line), "missing {line}:\n{out}");
     }
+
+    let report = t
+        .svc
+        .report_first_token(Request::new(ReportFirstTokenRequest {
+            response_id: response.response_id,
+            observed_ttft_ms: 40,
+            upstream_status: 200,
+        }))
+        .await
+        .expect("a response")
+        .into_inner();
+    assert!(!report.acknowledged);
+}
+
+/// An `Abort` after a token-count pick releases the body.
+#[tokio::test]
+async fn an_abort_after_a_token_count_pick_releases_the_body() {
+    let (t, out) = pick_with_api_call(proto::ApiCall::MessagesCountTokens as i32).await;
+    let response = out.expect("a response").into_inner();
+
+    let out = t
+        .svc
+        .abort(Request::new(AbortRequest {
+            response_id: response.response_id,
+            ..Default::default()
+        }))
+        .await
+        .expect("a response")
+        .into_inner();
+    assert!(out.released);
+    assert_eq!(t.svc.bodies.store.stats().1, 0, "the body is released");
+}
+
+/// An unknown value fails with `INVALID_ARGUMENT`.
+#[tokio::test]
+async fn a_pick_with_an_unknown_api_call_is_invalid() {
+    let (t, out) = pick_with_api_call(99).await;
+    let status = out.expect_err("a status");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+    assert_eq!(t.svc.bodies.store.stats().1, 0, "the body is released");
+    assert!(t.svc.observations.pending.is_empty());
+    let out = t.metrics();
+    assert!(
+        !out.lines()
+            .any(|l| l.starts_with("kinference_picks_total{") && !l.ends_with(" 0")),
+        "{out}"
+    );
 }
