@@ -43,6 +43,15 @@ curl -sf localhost:18000/v1/chat/completions \
   > /dev/null
 echo "✓ completion request served"
 
+# Kinference gets the token ids of a Messages body from this route.
+curl -sf localhost:18000/v1/messages/render \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"HuggingFaceTB/SmolLM2-135M-Instruct","max_tokens":8,
+       "messages":[{"role":"user","content":"hi"}]}' \
+  | grep -Eq '"token_ids": *\[ *[0-9]' \
+  || { echo "✗ /v1/messages/render returned no token ids" >&2; exit 1; }
+echo "✓ /v1/messages/render returns token ids"
+
 # The index gauge refreshes on a throttled ~10s radix-tree dump.
 poll 120 "KV events ingested (kinference_index_blocks > 0)" \
   bash -c 'curl -s localhost:19001/metrics | grep -E "^kinference_index_blocks [1-9]"'

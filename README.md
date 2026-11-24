@@ -6,8 +6,9 @@ Kinference is an inference _control plane_ for Kubernetes and vLLM.
 
 At its core, Kinference selects among inference endpoints, applying policies,
 routing, and load balancing as appropriate. It exposes a gRPC interface that
-takes an inference request (e.g. in OpenAI chat-completions format) and returns
-the endpoint for that request, as well as the appropriate-mutated body.
+takes an inference request (e.g. in OpenAI chat-completions or Anthropic
+Messages format) and returns the endpoint for that request, as well as the
+appropriate-mutated body.
 
 To do this, Kinference monitors vLLM KV-cache events and engine metrics.
 Kinference currently uses NVIDIA's
@@ -63,7 +64,6 @@ at your own risk.
 The current Kinference implementation lacks several features that are in the
 full scope of the project, including:
 
-* Support for /v1/messages (Anthropic-style calls)
 * Rate limiting
 * Semantic classifiers
 * Support for multiple replicas
