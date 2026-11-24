@@ -521,7 +521,12 @@ impl KinferenceService {
             // An off-cluster destination: nothing pool-scoped applies. Rewrite
             // the body to the vendor's model name; `commit` holds an observation
             // for the reported TTFT.
-            Ok(PolicySelection::Provider(pick)) => {
+            Ok(PolicySelection::Provider(mut pick)) => {
+                // One `spec.path` can't name both Messages paths, so the
+                // caller keeps the path that the client sent.
+                if token_count {
+                    pick.path = None;
+                }
                 if !body.name_model(req.body, &pick.upstream_model) {
                     tracing::error!(
                         to_model = %pick.upstream_model,
@@ -608,6 +613,7 @@ impl KinferenceService {
                     req.qos,
                     &req.identity.tenant,
                     streaming,
+                    req.api_call,
                 );
                 self.prom.record_routed(
                     &req.identity.tenant,
@@ -874,6 +880,7 @@ impl KinferenceService {
                         // A local pick, so there is no provider to attribute
                         // feedback to.
                         provider: None,
+                        api_call: req.api_call,
                     },
                 );
 

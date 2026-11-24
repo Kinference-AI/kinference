@@ -43,6 +43,7 @@ enum Policy {
 pub(crate) struct ServiceBuilder {
     pools: Vec<PoolFixture>,
     providers: Vec<(String, &'static str, serde_json::Value)>,
+    provider_path: Option<String>,
     policy: Policy,
     render: Render,
 }
@@ -52,6 +53,7 @@ impl ServiceBuilder {
         Self {
             pools: Vec::new(),
             providers: Vec::new(),
+            provider_path: None,
             policy: Policy::ListedEmpty,
             // Two full blocks at the test workers' block size of 16.
             render: Render::Tokens((1..=32).collect()),
@@ -110,6 +112,12 @@ impl ServiceBuilder {
     /// [`Self::provider`], with `api: Anthropic`.
     pub(crate) fn anthropic_provider(mut self, name: &str, models: serde_json::Value) -> Self {
         self.providers.push((name.into(), "Anthropic", models));
+        self
+    }
+
+    /// The `spec.path` of every provider.
+    pub(crate) fn provider_path(mut self, path: &str) -> Self {
+        self.provider_path = Some(path.into());
         self
     }
 
@@ -190,12 +198,16 @@ impl ServiceBuilder {
             Policy::Spec(spec) => {
                 let mut provs = Vec::new();
                 for (name, api, models) in &self.providers {
-                    provs.push(cr::<InferenceProvider>(serde_json::json!({
+                    let mut provider = serde_json::json!({
                         "apiVersion": "kinference.buoyant.io/v1alpha1", "kind": "InferenceProvider",
                         "metadata": {"name": name, "namespace": "default"},
                         "spec": {"backendRef": {"name": format!("{name}-backend")}, "api": api,
                                  "models": models}
-                    })));
+                    });
+                    if let Some(path) = &self.provider_path {
+                        provider["spec"]["path"] = path.as_str().into();
+                    }
+                    provs.push(cr::<InferenceProvider>(provider));
                     dests.push(serde_json::json!({"kind": "InferenceProvider", "name": name}));
                 }
                 let pool = cr::<InferencePool>(serde_json::json!({

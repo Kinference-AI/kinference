@@ -203,6 +203,7 @@ fn request_labels_round_trip_the_metric_labels() {
             tenant: "acme".to_string(),
             streaming: true,
             picked_at: Instant::now(),
+            api_call: kinference_policy::ApiCall::ChatCompletions,
             provider: None,
         },
     );
@@ -226,6 +227,7 @@ fn request_labels_round_trip_the_metric_labels() {
             // Non-streaming, whose reported first-token time is total latency.
             streaming: false,
             picked_at: Instant::now(),
+            api_call: kinference_policy::ApiCall::ChatCompletions,
             provider: Some(kinference_policy::engine::ObjectKey {
                 namespace: "default".to_string(),
                 name: "together".to_string(),
