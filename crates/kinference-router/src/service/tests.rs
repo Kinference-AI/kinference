@@ -1766,3 +1766,34 @@ async fn a_token_count_pick_matches_no_input_tokens_rule() {
     assert!(nonzero(&out, "kinference_policy_rule_matches_total").is_empty());
     assert!(nonzero(&out, "kinference_predicted_ttft_ms_count").is_empty());
 }
+
+/// A local token-count pick reserves no in-flight state and leaves nothing
+/// for the reports, and the next pick sees an idle worker.
+#[tokio::test]
+async fn a_local_token_count_pick_writes_no_state() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .build()
+        .await;
+
+    let out = t
+        .pick_as(
+            ApiCall::MessagesCountTokens,
+            COUNT_TOKENS_BODY,
+            1,
+            Qos::Interactive,
+            None,
+        )
+        .await;
+    assert!(matches!(out, PickAndRecordOutcome::Ok { .. }), "{out:?}");
+
+    assert!(t.svc.observations.pending.is_empty());
+    assert!(t.svc.observations.labels.take(1).is_none());
+    assert_eq!(t.pools[0].inflight.get("10.0.0.1:8000"), 0);
+    assert_eq!(t.pools[0].inflight_prefixes.len(), 0);
+
+    let out = t.metrics();
+    assert!(nonzero(&out, "kinference_prefix_requested_blocks_total").is_empty());
+    let routed = r#"kinference_routed_requests_total{destination="qwen-ws",tenant="default",type="Local"} 1"#;
+    assert!(out.contains(routed), "missing {routed}:\n{out}");
+}

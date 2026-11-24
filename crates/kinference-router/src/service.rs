@@ -733,8 +733,8 @@ pub(crate) enum TokenSource {
 
 /// Outcome of [`KinferenceService::pick_and_record`]. For `Ok` and `Degraded`
 /// the side effects (inflight increment, inflight-prefix insert,
-/// pending-observation stash) have been applied; the error outcomes write no
-/// state.
+/// pending-observation stash) have been applied; the error outcomes and a
+/// local token-count pick write no state.
 #[derive(Debug)]
 pub(crate) enum PickAndRecordOutcome {
     /// Successful pick. The caller dispatches to `endpoint` and later reports
