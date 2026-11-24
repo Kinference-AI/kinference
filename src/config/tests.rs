@@ -198,6 +198,43 @@ fn an_undefined_profile_is_rejected_and_names_both_sides() {
     );
 }
 
+/// The config ignores a per-block predictor key, and the profile runs on
+/// the per-token defaults.
+#[test]
+fn a_leftover_per_block_predictor_key_is_ignored() {
+    let cfg = parse(json!({
+        "listen": "127.0.0.1:50051",
+        "profile": [{"name": "t", "predictor": {
+            "attention_uncached_block_ms": 2.3,
+            "attention_uncached_per_every_block_ms": 0.009,
+        }}],
+        "workerset": [workerset("a", "t", "svc")],
+    }))
+    .expect("parses");
+    assert_eq!(cfg.profiles[0].predictor, PredictorConfig::default());
+}
+
+/// The per-token predictor keys parse next to an unknown key.
+#[test]
+fn the_per_token_predictor_keys_parse() {
+    let cfg = parse(json!({
+        "listen": "127.0.0.1:50051",
+        "profile": [{"name": "t", "predictor": {
+            "attention_uncached_token_ms": 0.08,
+            "attention_uncached_per_every_token_ms": 0.0000078125,
+            "q_running_penalty_peak_ms": 0,
+            "some_unknown_key": 1,
+        }}],
+        "workerset": [workerset("a", "t", "svc")],
+    }))
+    .expect("parses");
+    let p = &cfg.profiles[0].predictor;
+    assert_eq!(p.attention_uncached_token_ms, 0.08);
+    assert_eq!(p.attention_uncached_per_every_token_ms, 0.0000078125);
+    assert_eq!(p.q_running_penalty_peak_ms, 0.0);
+    assert_eq!(p.base_ms, PredictorConfig::default().base_ms);
+}
+
 /// Two sets sharing a profile get identical tuning.
 #[test]
 fn two_worker_sets_sharing_a_profile_get_identical_tuning() {

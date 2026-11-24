@@ -141,9 +141,15 @@ which the chart renders to JSON. A checksum annotation on the pod restarts
 the pod when the rendered config changes:
 
 ```sh
-helm upgrade kinference charts/kinference --reuse-values \
+helm upgrade kinference charts/kinference --reset-then-reuse-values \
   --set config.metrics_poll_ms=500
 ```
+
+`--reset-then-reuse-values` keeps the values that the operator set and
+takes every other value from the chart. `--reuse-values` keeps the
+defaults of the chart that the release was installed from. Kinference
+ignores a default that the config no longer reads, and runs on the
+default in the code.
 
 The same command sets the chart's other knobs: `logLevel` sets `RUST_LOG`
 (`kinference=trace,dynamo_kv_router=trace` for KV-event debugging),
@@ -169,7 +175,7 @@ text format does not quote its fields reliably. Helm splits `--set` values
 on commas, so the commas inside `logLevel` need a backslash:
 
 ```sh
-helm upgrade kinference charts/kinference --reuse-values \
+helm upgrade kinference charts/kinference --reset-then-reuse-values \
   --set logFormat=json \
   --set logLevel='kinference=info\,kinference::observation=debug\,dynamo_kv_router::indexer::radix_tree=error\,dynamo_kv_router=warn'
 ```
@@ -197,6 +203,15 @@ read the list as an array:
 ```sh
 jq -c '.inflight_overlap_blocks | fromjson' observations.jsonl
 ```
+
+The predictor counts prefill in tokens. A fit of
+`attention_uncached_token_ms` and `attention_uncached_per_every_token_ms`
+reads `input_tokens` and `overlap_tokens`, not the block counts.
+`q_workload_tokens` is in tokens too. A
+coefficient that was fitted per block at one block size `B` converts with
+`a / B` and `c / B²`. Kinference ignores the per-block keys
+`attention_uncached_block_ms` and `attention_uncached_per_every_block_ms`,
+so a profile that still sets them runs on the per-token defaults.
 
 ## When it does not
 

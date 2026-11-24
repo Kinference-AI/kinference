@@ -16,6 +16,7 @@ fn score(endpoint: &str, queue_waiting: u32) -> WorkerScore {
         kv_cache_usage: 0.0,
         block_size: Some(16),
         total_blocks: 4,
+        input_tokens: 64,
     }
 }
 
@@ -364,13 +365,14 @@ fn worker_score_maps_each_input_to_its_own_field() {
         ..Default::default()
     };
 
-    let s = worker_score(&entry, &sample, Some(16), 44, 55);
+    let s = worker_score(&entry, &sample, Some(16), 44, 55, 66);
 
     assert_eq!(s.name, "w-7");
     assert_eq!(s.endpoint, "10.0.0.7:8000");
     assert_eq!(s.block_size, Some(16), "block_size comes from the argument");
     assert_eq!(s.matched_blocks, 44);
     assert_eq!(s.total_blocks, 55);
+    assert_eq!(s.input_tokens, 66);
     assert_eq!(s.queue_waiting, 11);
     assert_eq!(s.queue_running, 22);
     assert_eq!(s.queue_swapped, 33);
@@ -470,6 +472,10 @@ async fn scoring_cuts_the_prompt_at_each_workers_block_size() {
     assert_eq!(blocks("10.0.0.2:8000"), (Some(64), 2, 2));
     // One peer has each size, so the smaller size wins.
     assert_eq!(blocks("10.0.0.3:8000"), (Some(16), 0, 8));
+    let uncached = |endpoint: &str| by_endpoint[endpoint].uncached_tokens();
+    assert_eq!(uncached("10.0.0.1:8000"), 64);
+    assert_eq!(uncached("10.0.0.2:8000"), 0);
+    assert_eq!(uncached("10.0.0.3:8000"), 128);
     assert_eq!(side.hashes_by_block_size[&16].len(), 8);
     assert_eq!(side.hashes_by_block_size[&64].len(), 2);
 }
@@ -509,8 +515,47 @@ async fn scoring_counts_no_blocks_when_no_worker_has_a_block_size() {
             (s.block_size, s.matched_blocks, s.total_blocks),
             (None, 0, 0)
         );
+        assert_eq!(s.uncached_tokens(), 128);
     }
     assert!(side.hashes_by_block_size.is_empty());
+}
+
+/// The next pick on a worker without a block size waits for the first prefill.
+#[tokio::test]
+async fn a_pick_without_a_block_size_charges_the_next_pick_its_prefill() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .render(Render::Tokens((1..=8000).collect()))
+        .build()
+        .await;
+    let registry = &t.pools[0].registry;
+    let unlearned = WorkerEntry {
+        indexed_group: None,
+        ..registry.lookup(1).expect("the builder's worker")
+    };
+    assert!(registry.unregister(1));
+    assert!(registry.register(1, unlearned));
+
+    for id in [1, 2] {
+        let out = t.pick(BODY, id, Qos::Interactive, None).await;
+        assert!(matches!(out, PickAndRecordOutcome::Ok { .. }), "{out:?}");
+    }
+
+    let p = &t.pools[0].predictor;
+    let cold = crate::picker::prefill_ms_for(p, 8000, 8000);
+    let first = t.svc.observations.pending.take(1).expect("the first pick");
+    assert_eq!(first.chosen_worker.block_size, None);
+    assert_eq!(first.prediction.prefill_ms, cold);
+    assert_eq!(first.prediction.q_ms, 0.0);
+
+    // The first prefill takes seconds, so some of it remains.
+    let second = t.svc.observations.pending.take(2).expect("the second pick");
+    assert_eq!(second.inflight_workload_tokens, 8000);
+    assert!(
+        second.prediction.q_ms > 0.0 && second.prediction.q_ms <= cold,
+        "{} of {cold}",
+        second.prediction.q_ms
+    );
 }
 
 // --- policy_select, end to end ----------------------------------------------
@@ -537,6 +582,7 @@ fn primary(pool: &Arc<Pool>, model: &str, workers: &[(&str, u32)]) -> ScoredGrou
                 kv_cache_usage: 0.0,
                 block_size: Some(16),
                 total_blocks: 4,
+                input_tokens: 64,
             })
             .collect(),
         side: ScoreSideData {
@@ -1094,10 +1140,8 @@ async fn a_good_pick_returns_the_worker_and_reserves_its_state() {
     assert_eq!(t.pools[0].inflight.get("10.0.0.1:8000"), 1);
     let dispatches = t.pools[0].inflight_prefixes.dispatches_for("10.0.0.1:8000");
     assert_eq!(dispatches.len(), 1);
-    assert_eq!(
-        dispatches[0].total_at_dispatch, 2,
-        "32 tokens in blocks of 16"
-    );
+    assert_eq!(dispatches[0].input_tokens, 32, "the prompt's token count");
+    assert_eq!(dispatches[0].uncached_tokens, 32);
 
     let out = t.metrics();
     for line in [
@@ -1349,10 +1393,7 @@ async fn degraded_pick(render: Render) {
     assert_eq!(t.pools[0].inflight.get("10.0.0.1:8000"), 1);
     let dispatches = t.pools[0].inflight_prefixes.dispatches_for("10.0.0.1:8000");
     assert_eq!(dispatches.len(), 1);
-    assert_eq!(
-        dispatches[0].total_at_dispatch, 0,
-        "no tokens, so no blocks"
-    );
+    assert_eq!(dispatches[0].input_tokens, 0, "no tokens, so no blocks");
 
     let out = t.metrics();
     for line in [
@@ -1566,8 +1607,10 @@ async fn a_messages_pick_renders_the_body_unchanged() {
     assert_eq!(seen[0].path, "/v1/messages/render");
     assert_eq!(seen[0].body, MESSAGES_BODY);
     let dispatches = t.pools[0].inflight_prefixes.dispatches_for("10.0.0.1:8000");
+    assert_eq!(dispatches[0].input_tokens, 32);
     assert_eq!(
-        dispatches[0].total_at_dispatch, 2,
+        dispatches[0].remaining.len(),
+        2,
         "32 tokens in blocks of 16"
     );
     assert!(

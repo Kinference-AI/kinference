@@ -182,10 +182,11 @@ skipped event. Two reasons change.
 
 Two pieces of work need their own issues.
 
-The first is prefill time in tokens. With coefficients per token, one
-profile gives comparable prefill times to workers with different block
-sizes. The change renames the predictor's two coefficients, so every
-operator with a fitted profile has to convert the profile.
+The first is prefill time in tokens, which issue 249 delivers. With
+coefficients per token, one profile gives comparable prefill times to
+workers with different block sizes. The change renames the predictor's
+two coefficients, so every operator with a fitted profile has to
+convert the profile.
 
 The second is more than one group per worker. That design has to say
 how the radix tree keeps two groups of one worker apart, and how
