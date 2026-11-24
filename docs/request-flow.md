@@ -53,6 +53,13 @@ The proto header gives the wire sequence: `PushBody`, `Pick`, `PullBody`,
 `ReportFirstToken`, `ReportFinalToken`, and `Abort` if the request dies
 after the pick. All of this code is in `kinference-router`.
 
+The caller names the API call of each request in `PickRequest.api_call`.
+The caller derives the value from the path of the client's request, and
+Kinference never guesses the value from the body. The three values are a
+chat completion, a Messages request to `/v1/messages`, and a token-count
+request to `/v1/messages/count_tokens`. The steps below are the same for
+the three API calls, except where a step names one of them.
+
 ```mermaid
 sequenceDiagram
     participant G as gateway
@@ -85,7 +92,8 @@ the stream, `push_body` discards the bytes.
 ### Pick
 
 `grpc::pick` takes the `stream_id` out of the body store with
-`begin_pick`, so a second `Pick` on the same id fails. Then it calls
+`begin_pick`, so a second `Pick` on the same id fails. An unknown
+`api_call` value fails the `Pick` with `INVALID_ARGUMENT`. Then it calls
 `service::lifecycle::pick_and_record`, which runs five steps. Each step is
 a method whose typed result the next step consumes.
 
@@ -97,14 +105,18 @@ a method whose typed result the next step consumes.
    the named `InferencePool` may serve a model that no local pool serves,
    so the service checks for one before it refuses the request. The
    pick-time rewrites in `pick_body` happen here. They set the resolved
-   model, and for a streaming request they set
+   model, and for a streaming chat completion they set
    `stream_options.include_usage`, so that the final usage block exists
-   for the caller to report later. The service takes the chat-template
-   inputs from the serialized body.
+   for the caller to report later. A Messages stream always reports
+   usage, so a Messages body and a token-count body get only the
+   resolved model. For a chat completion, the service takes the
+   chat-template inputs from the serialized body.
 3. Score the groups. For the first pool that serves the model,
    `service::scoring::score_workers` takes the ready workers and tokenizes
    the prompt through the pool's tokenize mode: in process, through vLLM's
-   `/render`, or both, compared. Then, for each block size among the
+   `/render`, or both, compared. A Messages request always goes to
+   vLLM's `/v1/messages/render`, whatever tokenize mode the pool has.
+   Then, for each block size among the
    workers, it hashes the tokens into blocks and matches the blocks
    against the pool's radix tree, which gives the cached-prefix overlap
    for each worker at the worker's own block size. A worker that has
@@ -115,13 +127,18 @@ a method whose typed result the next step consumes.
    last scrape sample gives each worker's load. If tokenizing fails
    everywhere, scoring falls back to load alone rather than failing the
    pick. The service scores any further pools that serve the model with
-   the same tokens.
+   the same tokens. A token-count request never reaches the model, so
+   scoring tokenizes nothing for it and scores each worker on load alone.
 4. Select. With no `InferencePool` named, or with policy disabled,
    `best_group` ranks the scored pools, and the winner's group goes on to
    the commit. With a pool named, `service::policy_driver::policy_select`
    runs the compiled `InferencePolicy` over a snapshot of pools, worker
    sets and providers. It flattens the candidates per endpoint, applies
-   the exclusions, and ranks the rest. Ranking holds no pool lock, because
+   the exclusions, and ranks the rest. A provider is a candidate only
+   when its `api` matches the API call: an `Anthropic` provider for a
+   Messages request or a token-count request, and an `OpenAI` provider
+   for a chat completion. The policy gets no input token count for a
+   token-count request. Ranking holds no pool lock, because
    candidates may span pools, so the ranking's input may miss one
    concurrent pick. The winner is either a local group or a provider. If
    the policy chose a model other than the one that the body names, the
@@ -138,8 +155,13 @@ a method whose typed result the next step consumes.
      `response_id`.
    - It increments the routed counter.
 
+   For a token-count request, the picker reads the in-flight counts as
+   load, and the service only increments the routed counter.
+
    When a provider wins, the service skips the lock and the fleet
-   bookkeeping and records a provider pick instead.
+   bookkeeping and records a provider pick instead. For a token-count
+   request, the response has no provider path, and the caller keeps the
+   path that the client sent.
 
 Back in `grpc::pick`, the service commits the rewritten body to the body
 store under the `response_id`. The response holds the endpoint, the
@@ -162,6 +184,11 @@ provider the report feeds provider health instead. An upstream status of
 zero in the report means that no response reached the caller. The service
 then treats the request as never dispatched, and releases it through
 `abort_request` rather than finalizing it.
+
+For a token-count request, the caller sends this report when the response
+ends, and sends no `ReportFinalToken`. A local token-count pick left no
+state, so the report finds nothing. For a provider, the report feeds
+provider health and releases the record of the pick.
 
 ### ReportFinalToken
 
