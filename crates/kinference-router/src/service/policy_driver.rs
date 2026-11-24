@@ -226,7 +226,8 @@ impl KinferenceService {
                                 scored.len() - 1
                             }
                         };
-                        let new = self.candidates_for(&scored[idx], idx, dest, &target.model);
+                        let new =
+                            self.candidates_for(&scored[idx], idx, dest, &target.model, api_call);
                         built.insert(
                             key,
                             (candidates.len()..candidates.len() + new.len()).collect(),
@@ -359,6 +360,7 @@ impl KinferenceService {
         group_idx: usize,
         dest: &kinference_policy::resolve::ResolvedWorkerSet,
         canonical_model: &str,
+        api_call: ApiCall,
     ) -> Vec<kinference_policy::engine::Candidate> {
         let now = Instant::now();
         let ready_endpoints = group.pool.registry.len() as i64;
@@ -418,8 +420,11 @@ impl KinferenceService {
                         .total_ms();
                 // Recorded for every candidate, as a `predictedTTFT` threshold
                 // applies to every candidate; winners only would bias it low.
-                self.prom
-                    .record_predicted_ttft(&s.endpoint, &group.model, predicted as f64);
+                // A token-count request has no first token.
+                if api_call != ApiCall::MessagesCountTokens {
+                    self.prom
+                        .record_predicted_ttft(&s.endpoint, &group.model, predicted as f64);
+                }
                 let hit_ratio = if s.total_blocks > 0 {
                     s.matched_blocks as f64 / s.total_blocks as f64
                 } else {

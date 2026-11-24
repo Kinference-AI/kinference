@@ -539,9 +539,9 @@ impl KinferenceService {
 }
 
 /// Project a scraped sample onto a [`WorkerScore`], for both `score_workers`
-/// and [`Scoring::degraded_response`].
+/// and [`Scoring::load_only_response`].
 ///
-/// The prefix-cache values are parameters because the degraded path zeroes
+/// The prefix-cache values are parameters because a load-only pick zeroes
 /// them while still reporting real load.
 fn worker_score(
     entry: &WorkerEntry,

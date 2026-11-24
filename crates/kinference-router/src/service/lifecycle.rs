@@ -270,7 +270,9 @@ impl KinferenceService {
             }),
         };
 
-        let raw_body = Some(body.bytes(req.body).to_vec());
+        // A token-count pick makes no render call, so nothing reads the body.
+        let raw_body =
+            (req.api_call != ApiCall::MessagesCountTokens).then(|| body.bytes(req.body).to_vec());
         // Only `/render` reads a Messages body, so no chat input is taken.
         if req.api_call != ApiCall::ChatCompletions {
             return Ok(Resolved {
@@ -462,9 +464,12 @@ impl KinferenceService {
         // policy's `candidates_for` when a policy is in play, otherwise this.
         // Recording in both would double-count. A request naming an unresolved
         // pool records none, but is counted under
-        // `kinference_policy_decisions_total`.
+        // `kinference_policy_decisions_total`. A token-count request records
+        // none, because it has no first token.
         let policy = self.policy_for(req);
-        let winner = best_group(groups, policy.is_none().then_some(&*self.prom));
+        let token_count = req.api_call == ApiCall::MessagesCountTokens;
+        let record_predictions = policy.is_none() && !token_count;
+        let winner = best_group(groups, record_predictions.then_some(&*self.prom));
 
         // No pool named, or policy disabled: the ranking decided, and providers
         // are unreachable.
@@ -497,7 +502,10 @@ impl KinferenceService {
             // The prompt's token count, from scoring. `None` when nothing
             // local was scored, so `inputTokens` predicates and context-window
             // fitting don't apply.
-            input_tokens: winner.as_ref().map(|w| w.side.tokens.len() as i64),
+            input_tokens: winner
+                .as_ref()
+                .filter(|_| !token_count)
+                .map(|w| w.side.tokens.len() as i64),
             max_tokens: facts.max_tokens,
             qos: Some(req.qos.as_label().to_string()),
             tenant: req.identity.tenant.clone(),

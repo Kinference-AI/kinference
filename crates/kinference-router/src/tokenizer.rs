@@ -137,6 +137,10 @@ impl ByMode {
 impl Tokenizer for ByMode {
     fn tokenize<'a>(&'a self, req: TokenizeRequest<'a>) -> BoxFuture<'a, TokenizeOutcome> {
         Box::pin(async move {
+            debug_assert!(
+                req.api_call != ApiCall::MessagesCountTokens,
+                "a token-count pick is scored without tokens"
+            );
             let started = Instant::now();
             let outcome = match (req.api_call, req.mode) {
                 (ApiCall::ChatCompletions, TokenizeMode::Local) => {

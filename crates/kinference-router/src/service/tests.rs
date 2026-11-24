@@ -1658,3 +1658,111 @@ async fn a_messages_pick_returns_an_anthropic_provider() {
     assert!(rewritten.get("stream_options").is_none(), "{rewritten}");
     assert_eq!(t.render_calls(), 0);
 }
+
+const COUNT_TOKENS_BODY: &[u8] = br#"{"model":"qwen","messages":[{"role":"user","content":"hi"}]}"#;
+
+/// A token-count pick is `Ok` on load alone and makes no render call,
+/// whatever the render service would answer.
+#[tokio::test]
+async fn a_token_count_pick_makes_no_render_call() {
+    for render in [Render::Tokens((1..=32).collect()), Render::Failing] {
+        let t = ServiceBuilder::new()
+            .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+            .render(render)
+            .build()
+            .await;
+
+        let out = t
+            .pick_as(
+                ApiCall::MessagesCountTokens,
+                COUNT_TOKENS_BODY,
+                1,
+                Qos::Interactive,
+                None,
+            )
+            .await;
+        let PickAndRecordOutcome::Ok { endpoint, body, .. } = out else {
+            panic!("{out:?}");
+        };
+        assert_eq!(endpoint, "10.0.0.1:8000");
+        assert!(body.is_empty(), "the pushed body goes out unchanged");
+        assert_eq!(t.render_calls(), 0);
+
+        let out = t.metrics();
+        for family in [
+            "kinference_tokenize_total",
+            "kinference_score_degraded_total",
+            "kinference_predicted_ttft_ms_count",
+        ] {
+            assert!(nonzero(&out, family).is_empty(), "{family}:\n{out}");
+        }
+    }
+}
+
+/// Two worker sets serving one model: a token-count pick goes to the less
+/// loaded one, and neither set gets a render call.
+#[tokio::test]
+async fn a_token_count_pick_across_two_pools_makes_no_render_call() {
+    let t = ServiceBuilder::new()
+        .pool("busy-ws", "qwen", &["10.0.0.1:8000"])
+        .pool("idle-ws", "qwen", &["10.0.0.2:8000"])
+        .build()
+        .await;
+    t.svc.scoring.scrape.record_sample_for_test(
+        1,
+        kinference_fleet::scrape::MetricsSample {
+            waiting: 64,
+            scraped_at: Some(Instant::now()),
+            ..Default::default()
+        },
+    );
+
+    let out = t
+        .pick_as(
+            ApiCall::MessagesCountTokens,
+            COUNT_TOKENS_BODY,
+            1,
+            Qos::Interactive,
+            None,
+        )
+        .await;
+    let PickAndRecordOutcome::Ok { endpoint, .. } = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(endpoint, "10.0.0.2:8000");
+    assert_eq!(t.render_calls(), 0);
+}
+
+/// A token-count pick gives the policy no input token count, so a rule on
+/// `inputTokens` doesn't match and the request stays local.
+#[tokio::test]
+async fn a_token_count_pick_matches_no_input_tokens_rule() {
+    let t = ServiceBuilder::new()
+        .pool("qwen-ws", "qwen", &["10.0.0.1:8000"])
+        .anthropic_provider(
+            "anthropic",
+            serde_json::json!([{"name": "vendor/qwen", "aliases": ["qwen"]}]),
+        )
+        .policy(serde_json::json!({"rules": [{"name": "short-to-cloud",
+            "matches": [{"inputTokens": {"lessThan": 100}}],
+            "route": {"consider": [{"type": "Provider"}], "select": [{"order": ["anthropic"]}]}}]}))
+        .build()
+        .await;
+    let pool = TestService::pool_ref();
+
+    let out = t
+        .pick_as(
+            ApiCall::MessagesCountTokens,
+            COUNT_TOKENS_BODY,
+            1,
+            Qos::Interactive,
+            Some(&pool),
+        )
+        .await;
+    assert!(matches!(out, PickAndRecordOutcome::Ok { .. }), "{out:?}");
+    assert_eq!(t.render_calls(), 0);
+
+    let out = t.metrics();
+    assert!(nonzero(&out, "kinference_policy_rule_matches_total").is_empty());
+    assert!(nonzero(&out, "kinference_predicted_ttft_ms_count").is_empty());
+}
