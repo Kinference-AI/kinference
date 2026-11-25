@@ -117,6 +117,15 @@ class PlanTest(unittest.TestCase):
         plan = self.plan(PullRequest(user_type="Bot"))
         self.assertEqual(plan, {"number": 7, "action": "none", "reason": "a bot opened the pull request"})
 
+    def test_large_waits_for_ci(self):
+        plan = self.plan(PullRequest(ci(None, "in_progress"), [check("success")], lines=1200))
+        self.assertEqual(plan["reason"], "CI or the e2e check has not finished")
+
+    def test_large_reports_a_ci_failure(self):
+        self.assertEqual(self.plan(PullRequest(ci("failure"), [], lines=1200))["action"], "ci_failed")
+
+    def test_large_skips_once_checks_pass(self):
+        self.assertEqual(self.plan(PullRequest(ci("success"), [check("success")], lines=1200))["action"], "skip_large")
 
 
 if __name__ == "__main__":
