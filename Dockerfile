@@ -7,7 +7,7 @@
 #       kinference --config /etc/kinference/config.json
 
 # Match rust-toolchain.toml, or rustup downloads that toolchain on every build.
-FROM --platform=$BUILDPLATFORM rust:1.95-slim-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:1.100-slim-trixie AS builder
 ARG TARGETARCH
 
 # The `zmq` crate compiles a bundled libzmq with g++; cargo needs git for the
@@ -50,7 +50,7 @@ RUN --mount=type=cache,id=cargo-$TARGETARCH,target=/usr/local/cargo/registry \
     && cp "target/$target/release/kinfctl" /out/ \
     && cp "target/$target/release/compute_hash" /out/
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /out/kinference         /usr/local/bin/kinference

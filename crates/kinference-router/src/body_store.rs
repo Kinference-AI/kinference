@@ -346,7 +346,7 @@ impl BodyStore {
         // Saturating: a double release would otherwise wrap and permanently
         // "free" the budget.
         self.bytes_in_use
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |cur| {
+            .try_update(Ordering::AcqRel, Ordering::Relaxed, |cur| {
                 Some(cur.saturating_sub(n))
             })
             .ok();
