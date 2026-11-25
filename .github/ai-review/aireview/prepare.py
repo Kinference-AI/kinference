@@ -160,6 +160,10 @@ def plan(gh, config, env, work, base_dir):
     if isinstance(resolved, dict):
         return resolved
     number, trigger, comment = resolved
+    return {"number": number, **_plan_pr(gh, config, env, work, base_dir, event, number, trigger, comment)}
+
+
+def _plan_pr(gh, config, env, work, base_dir, event, number, trigger, comment):
     pr = gh.repo_get(f"pulls/{number}")
     if pr["state"] != "open":
         return none("the pull request is closed")

@@ -1,3 +1,6 @@
+import json
+import os
+import tempfile
 import unittest
 
 from aireview import prepare
@@ -69,6 +72,51 @@ class TriggerTest(unittest.TestCase):
     def test_other_check_runs_do_nothing(self):
         event = {"check_run": {"name": "DCO", "head_sha": SHA}}
         self.assertEqual(prepare.resolve_trigger(FakeGitHub(), "check_run", event, CONFIG)["action"], "none")
+
+
+class PullRequest(FakeGitHub):
+    """A fake that serves pull request 7, opened by `user_type` with `lines` added."""
+
+    def __init__(self, ci=None, e2e=None, user_type="User", lines=10):
+        super().__init__(ci, e2e)
+        self.user_type, self.lines = user_type, lines
+
+    def repo_get(self, path):
+        if path == "pulls/7":
+            return {
+                "number": 7, "state": "open", "draft": False, "labels": [],
+                "user": {"type": self.user_type, "login": "contributor"}, "author_association": "CONTRIBUTOR",
+                "head": {"sha": SHA}, "additions": self.lines, "deletions": 0, "changed_files": 5,
+            }
+        if path.startswith(f"commits/{SHA}/check-runs?check_name=Pull"):
+            return {"check_runs": [check("success")]}
+        return super().repo_get(path)
+
+    def paginate(self, path):
+        return [] if path.endswith("/comments") else super().paginate(path)
+
+    def bot_comment(self, number, marker):
+        return None
+
+    def is_maintainer(self, login, assoc):
+        return False
+
+
+class PlanTest(unittest.TestCase):
+    def plan(self, gh):
+        with tempfile.TemporaryDirectory() as work:
+            path = os.path.join(work, "event.json")
+            with open(path, "w") as f:
+                json.dump({"check_run": {"name": "e2e", "head_sha": SHA}}, f)
+            env = {"GITHUB_EVENT_PATH": path, "GITHUB_EVENT_NAME": "check_run"}
+            with open(os.path.join(os.path.dirname(__file__), "..", "config.json")) as f:
+                config = json.load(f)
+            return prepare.plan(gh, config, env, work, work)
+
+    def test_none_plan_names_the_pull_request(self):
+        plan = self.plan(PullRequest(user_type="Bot"))
+        self.assertEqual(plan, {"number": 7, "action": "none", "reason": "a bot opened the pull request"})
+
 
 
 if __name__ == "__main__":
