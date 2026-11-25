@@ -11,8 +11,7 @@ same loop, through the recipes in the [justfile](../justfile).
 so you need the Rust toolchain only for `just lint` and `just test-unit`;
 on the host those two also need `g++`.
 
-The first `just image` compiles the `dynamo-kv-router` git dependency and
-takes a while; BuildKit cache mounts keep later builds incremental. The
+The first `just image` compiles every dependency and takes a while; BuildKit cache mounts keep later builds incremental. The
 worker below pulls a CPU vLLM image of about 600 MB and requests 500m CPU
 and 1 GiB of memory.
 
