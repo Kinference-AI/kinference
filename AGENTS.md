@@ -12,7 +12,7 @@ you push. `just` with no argument lists every recipe.
 - `just up`, `just test-smoke`, `just down`: build the image, create a
   kind cluster with both charts installed, run a CPU dummy-weights vLLM
   through `tests/e2e/smoke.sh`, and delete the cluster. The first image
-  build compiles the `dynamo-kv-router` git dependency and takes a while.
+  build compiles every dependency and takes a while.
 - `just install-cli`: install `kinfctl` into `~/.cargo/bin`.
 
 The end-to-end suite lives in a separate repository and reports as the

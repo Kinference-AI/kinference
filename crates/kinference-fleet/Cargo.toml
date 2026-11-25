@@ -19,7 +19,7 @@ tokio-util.workspace = true
 serde.workspace = true
 zmq.workspace = true
 tracing.workspace = true
-reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+reqwest = { workspace = true, features = ["json", "rustls"] }
 dashmap.workspace = true
 prometheus-parse.workspace = true
 prometheus.workspace = true

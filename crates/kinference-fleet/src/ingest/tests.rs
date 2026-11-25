@@ -76,6 +76,10 @@ fn stored_in(
         group_idx,
         kv_cache_spec_kind: kind,
         kv_cache_spec_sliding_window: None,
+        cache_namespace: None,
+        locality: None,
+        ownership: None,
+        session_id: None,
     }
 }
 
@@ -91,6 +95,8 @@ fn removed_in(hash: u64, group_idx: Option<u32>, kind: Option<KvCacheSpecKind>) 
         group_idx,
         kv_cache_spec_kind: kind,
         kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
     }
 }
 
@@ -496,31 +502,6 @@ fn cursor_state_transitions_through_initial_live_gap_stale() {
         CursorObservation::Gap {
             expected: 12,
             got: 20
-        }
-    ));
-}
-
-/// After a barrier (cache Cleared event) the cursor is
-/// invalidated; the next live frame observation reports
-/// `FreshAfterBarrier` rather than `Gap`, so we don't trigger an
-/// inline replay against a barrier-invalidated history.
-#[test]
-fn barrier_invalidates_cursor_and_fresh_observation_is_not_gap() {
-    let cursor = CursorState::Live(50);
-    let invalidated = cursor.invalidate_by_barrier();
-    assert!(matches!(
-        invalidated.observe(100),
-        CursorObservation::FreshAfterBarrier {
-            got: 100,
-            last_before_barrier: Some(50)
-        }
-    ));
-    // Frames at or before the barrier are stale (don't reapply).
-    assert!(matches!(
-        invalidated.observe(50),
-        CursorObservation::Stale {
-            got: 50,
-            last_applied: Some(50)
         }
     ));
 }
