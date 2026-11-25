@@ -75,7 +75,7 @@ jobs:
           COMMENT_ID: ${{ github.event.comment.id }}
         run: |
           gh api "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content=rocket > /dev/null
-      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
+      - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc
         id: checks-token
         with:
           client-id: ${{ secrets.E2E_APP_CLIENT_ID }}
@@ -93,7 +93,7 @@ jobs:
             -f name=e2e -f head_sha="$SHA" -f status=queued \
             -f details_url="$RUN_URL" --jq .id)
           echo "id=$id" >> "$GITHUB_OUTPUT"
-      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
+      - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc
         id: dispatch-token
         with:
           client-id: ${{ secrets.E2E_APP_CLIENT_ID }}
