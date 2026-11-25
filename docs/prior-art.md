@@ -65,11 +65,49 @@ what it is and where its design decisions are written down.
   schema in `api/v1alpha1/`. Bears on API formats, on the provider
   `api` field and on metric labels.
 
+## Rate limiting
+
+- Kuadrant, `Kuadrant/kuadrant-operator`. A Gateway API policy layer
+  whose `TokenRateLimitPolicy` charges the token counts that a
+  response reports. Its design is in
+  `doc/overviews/token-rate-limiting.md`. Bears on admission and
+  settlement of token limits.
+- Kong AI Rate Limiting Advanced, `developer.konghq.com/plugins/ai-rate-limiting-advanced/`.
+  A gateway plugin that limits LLM tokens per window and per node or
+  cluster. Bears on token costs and on dividing a limit across nodes.
+- LiteLLM, `BerriAI/litellm`. An LLM proxy with token and request
+  limits per key, user and team, in
+  `litellm/proxy/hooks/parallel_request_limiter_v3.py`. Bears on
+  reserving tokens at admission and reconciling them.
+- NGINX, `nginx/nginx`. The `limit_req` module keeps its state in a
+  named shared-memory zone that survives a reload. Bears on keeping
+  limiter state across config changes and on evicting idle state.
+- Linkerd proxy, `linkerd/linkerd2-proxy`. A Rust proxy with local
+  rate limits built on `governor`, in
+  `linkerd/proxy/server-policy/src/local_rate_limit.rs`. Bears on
+  keyed limiter state in a Rust proxy.
+- governor, `boinkor-net/governor`. The Rust crate for GCRA rate
+  limiters with keyed state. Bears on the choice between a crate and
+  a hand-written bucket.
+- IETF RateLimit header fields,
+  `datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/`.
+  The draft standard for limit headers on a response. Bears on what a
+  rejected client receives.
+
 ## API formats and telemetry
 
 - Anthropic API reference, `platform.claude.com/docs`. The Messages
   schema, the stream events and the usage fields. Bears on the API
   calls that the gateway names and on what the gateway reports.
+- OpenAI API reference, `developers.openai.com/api/docs`. The chat
+  completion schema, the usage fields and the provider's rate limits.
+  Bears on the usage that the gateway parses and on how clients
+  expect limits to behave.
+- The OpenAI and Anthropic SDKs, `openai/openai-python`,
+  `openai/openai-node`, `anthropics/anthropic-sdk-python` and
+  `anthropics/anthropic-sdk-typescript`. Their `_base_client.py` and
+  `client.ts` decide when a client retries a 429. Bears on the status
+  and headers of a rejection.
 - OpenTelemetry GenAI semantic conventions,
   `open-telemetry/semantic-conventions-genai`. Attribute names and
   token accounting for LLM telemetry, in `docs/gen-ai/`. Bears on
