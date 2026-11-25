@@ -400,6 +400,10 @@ async fn store_prefix(pool: &Pool, worker: u64, tokens: &[u32], block_size: u32,
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
+        cache_namespace: None,
+        locality: None,
+        ownership: None,
+        session_id: None,
     };
     let event = convert_event(
         raw,
@@ -407,6 +411,8 @@ async fn store_prefix(pool: &Pool, worker: u64, tokens: &[u32], block_size: u32,
         block_size,
         WorkerWithDpRank::new(worker, 0),
         &Default::default(),
+        None,
+        None,
     )
     .and_then(|e| e.into_router_event())
     .expect("a stored event");

@@ -20,7 +20,7 @@ futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+reqwest = { workspace = true, features = ["json", "rustls"] }
 dashmap.workspace = true
 prometheus.workspace = true
 # `http` for the Hub fetch; `onig` is the regex pre-tokenizer most models

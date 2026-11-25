@@ -471,9 +471,7 @@ async fn handle_observation(
             );
             return;
         }
-        CursorObservation::Initial { .. }
-        | CursorObservation::Contiguous { .. }
-        | CursorObservation::FreshAfterBarrier { .. } => {
+        CursorObservation::Initial { .. } | CursorObservation::Contiguous { .. } => {
             // Apply normally, advance.
         }
     }
@@ -577,9 +575,7 @@ async fn replay_gap(
             CursorObservation::Stale { .. } => {
                 continue;
             }
-            CursorObservation::Initial { .. }
-            | CursorObservation::Contiguous { .. }
-            | CursorObservation::FreshAfterBarrier { .. } => {}
+            CursorObservation::Initial { .. } | CursorObservation::Contiguous { .. } => {}
             CursorObservation::Gap { .. } => {
                 // Ahead of the cursor: accept it; a later observation
                 // retries the gap.
@@ -743,6 +739,11 @@ async fn apply_batch(
             block_size,
             worker,
             &state.memory.convert_warnings,
+            // No image or video token ids: the router hashes requests
+            // without rewriting multimodal placeholders, so events must not
+            // rewrite them either.
+            None,
+            None,
         ) else {
             continue;
         };
@@ -1039,7 +1040,10 @@ impl ZmqSocket {
     fn wrap(socket: zmq::Socket) -> Result<Self, Error> {
         let fd = socket.get_fd().map_err(zmq("socket get_fd"))?;
         let wrapper = SocketWrapper { socket, fd };
-        let inner = AsyncFd::new(wrapper).map_err(io("AsyncFd::new"))?;
+        // SAFETY: the wrapper owns the socket, and libzmq keeps `ZMQ_FD` open
+        // for the socket's lifetime.
+        let inner =
+            unsafe { AsyncFd::register(wrapper) }.map_err(|e| io("AsyncFd::register")(e.into()))?;
         Ok(Self { inner })
     }
 
