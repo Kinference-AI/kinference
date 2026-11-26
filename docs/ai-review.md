@@ -51,9 +51,9 @@ section of the handoff summary for the maintainer.
   without waiting for CI or the `e2e` check.
 
 The bot skips drafts, pull requests from bots and pull requests that
-change more than 1000 lines or 30 files. A pull request that is too
-large gets `size/xl` and `ai-review/skipped` and goes straight to the
-maintainers. On a pull request that a maintainer wrote, the bot posts
+change more than 1000 lines or 30 files. When CI and the `e2e` check
+pass on a pull request that is too large, the pull request gets
+`size/xl` and `ai-review/skipped` and goes straight to the maintainers. On a pull request that a maintainer wrote, the bot posts
 the labels and the handoff summary without the contributor rounds.
 
 Each reviewed pull request gets `size/*`, `risk/*` and `complexity/*`

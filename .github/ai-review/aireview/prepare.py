@@ -160,6 +160,10 @@ def plan(gh, config, env, work, base_dir):
     if isinstance(resolved, dict):
         return resolved
     number, trigger, comment = resolved
+    return {"number": number, **_plan_pr(gh, config, env, work, base_dir, event, number, trigger, comment)}
+
+
+def _plan_pr(gh, config, env, work, base_dir, event, number, trigger, comment):
     pr = gh.repo_get(f"pulls/{number}")
     if pr["state"] != "open":
         return none("the pull request is closed")
@@ -201,8 +205,6 @@ def plan(gh, config, env, work, base_dir):
     }
     if trigger == "ready":
         return {**base, "action": "handoff"}
-    if base["size"] == "xl":
-        return {**base, "action": "skip_large"}
     if auto:
         if not _policy_passed(gh, sha, config["policy_check"]):
             return none("the pull request policy check has not passed")
@@ -211,6 +213,8 @@ def plan(gh, config, env, work, base_dir):
             return none("CI or the e2e check has not finished")
         if status == "failure":
             return {**base, "action": "ci_failed", "jobs": jobs}
+    if base["size"] == "xl":
+        return {**base, "action": "skip_large"}
 
     gitdir = os.path.join(work, "git")
     gitio.fetch(gitdir, gh.repo, number, pr["base"]["ref"])

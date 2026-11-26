@@ -44,7 +44,15 @@ def prepare():
     plan = p.plan(_gh(), _load("config.json"), os.environ, os.environ["AI_REVIEW_WORK"], BASE_DIR)
     with open(_work("plan.json"), "w") as f:
         json.dump(plan, f)
-    print(f"action: {plan['action']} {plan.get('reason', '')}".strip())
+    reason = f": {plan['reason']}" if plan.get("reason") else ""
+    number = plan.get("number")
+    if number is None:
+        print(f"pr: none, action: {plan['action']}{reason}")
+        _summary(f"No pull request, action {plan['action']}{reason}.")
+    else:
+        url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/pull/{number}"
+        print(f"pr: {number}, action: {plan['action']}{reason}")
+        _summary(f"Pull request [#{number}]({url}), action {plan['action']}{reason}.")
     with open(os.environ["GITHUB_OUTPUT"], "a") as f:
         f.write(f"action={plan['action']}\n")
 
