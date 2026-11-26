@@ -65,7 +65,7 @@ def review(config, schema, prompt, base_dir, tree, inp):
     client = anthropic.Anthropic()
     tools = Tools(tree)
     messages = [{"role": "user", "content": user_message(inp)}]
-    usage = {"input": 0, "output": 0, "cache_read": 0}
+    usage = {"uncached": 0, "cache_write": 0, "cache_read": 0, "output": 0}
     params = dict(
         model=config["model"],
         max_tokens=config["max_tokens"],
@@ -86,9 +86,10 @@ def review(config, schema, prompt, base_dir, tree, inp):
             return {"error": f"model API returned {err.status_code}", "usage": usage}
         except anthropic.APIConnectionError:
             return {"error": "model API unreachable", "usage": usage}
-        usage["input"] += response.usage.input_tokens
-        usage["output"] += response.usage.output_tokens
+        usage["uncached"] += response.usage.input_tokens
+        usage["cache_write"] += response.usage.cache_creation_input_tokens or 0
         usage["cache_read"] += response.usage.cache_read_input_tokens or 0
+        usage["output"] += response.usage.output_tokens
         messages.append({"role": "assistant", "content": response.content})
 
         if response.stop_reason == "refusal":
