@@ -66,7 +66,11 @@ def agent():
     with open(_work("result.json"), "w") as f:
         json.dump(result, f)
     u = result["usage"]
-    _summary(f"Model tokens: {u['input']} input, {u['cache_read']} read from cache, {u['output']} output.")
+    total = u["uncached"] + u["cache_write"] + u["cache_read"]
+    _summary(
+        f"Model tokens: {total} input ({u['uncached']} uncached, {u['cache_write']} written to cache, "
+        f"{u['cache_read']} read from cache), {u['output']} output."
+    )
     if "error" in result:
         print(f"::warning::review failed: {result['error']}")
 
