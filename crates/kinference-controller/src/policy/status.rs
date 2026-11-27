@@ -1038,23 +1038,24 @@ impl<A: ApiServer> StatusWriter<A> {
 
             // --- rejected providers ----------------------------------------
             //
-            // Never destinations, so the loop above misses them. Names starting
-            // with `<` are placeholders (`<unset>`, `<selector>`), not objects.
+            // Never destinations, so the loop above misses them. Only a
+            // provider that the resolver found has a UID. A missing one or one
+            // that the pool may not reach is reported on the pool alone.
             for u in resolved
                 .unresolved
                 .iter()
-                .filter(|u| u.kind == "InferenceProvider" && !u.name.starts_with('<'))
+                .filter(|u| u.kind == "InferenceProvider" && u.uid.is_some())
             {
                 let prev = self.previous::<InferenceProviderStatus>(
                     "InferenceProvider",
-                    &resolved.namespace,
+                    &u.namespace,
                     &u.name,
                     u.uid.as_deref(),
                 );
                 let desired = rejected_provider_status(u.reason, prev.as_ref());
                 self.patch::<InferenceProvider>(
                     "InferenceProvider",
-                    &resolved.namespace,
+                    &u.namespace,
                     &u.name,
                     u.uid.as_deref(),
                     &desired,
