@@ -7,16 +7,13 @@ name: e2e
 #
 # A pull request from a branch in this repository is dispatched on every
 # push. A pull request from a fork gets no secrets on `pull_request`, so
-# it is dispatched when a maintainer comments `/e2e` on it. Both paths
-# check nothing out and call the API as the App that owns the check run.
+# it is dispatched when a maintainer comments `/e2e <sha>` on it. Both
+# paths check nothing out and call the API as the App that owns the check
+# run.
 on:
   pull_request:
   issue_comment:
     types: [created]
-
-concurrency:
-  group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
 
 jobs:
   dispatch:
@@ -26,6 +23,11 @@ jobs:
       || (github.event_name == 'issue_comment'
         && github.event.issue.pull_request != null
         && startsWith(github.event.comment.body, '/e2e'))
+    # At job level, so that a skipped run for an unrelated comment or a
+    # fork push doesn't cancel a dispatch in flight.
+    concurrency:
+      group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     # The comment path reads the pull request and reacts to the comment.
@@ -51,18 +53,31 @@ jobs:
             admin|maintain|write) ;;
             *) echo "::error::$LOGIN has $perm access; /e2e needs write"; exit 1 ;;
           esac
+      # The comment event carries no commit, and the fork can push between
+      # the comment and this step. So the comment names the commit that the
+      # maintainer reviewed, and the step refuses any other head.
       - name: Resolve the head commit
         id: head
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_SHA: ${{ github.event.pull_request.head.sha }}
           EVENT_BRANCH: ${{ github.event.pull_request.head.ref }}
+          COMMENT: ${{ github.event.comment.body }}
         run: |
           if [[ $GITHUB_EVENT_NAME == pull_request ]]; then
             sha=$EVENT_SHA
             branch=$EVENT_BRANCH
           else
             read -r sha branch < <(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '"\(.head.sha) \(.head.ref)"')
+            re='^/e2e[[:space:]]+([0-9a-f]{7,40})[[:space:]]*$'
+            if [[ ! $COMMENT =~ $re ]]; then
+              echo "::error::comment '/e2e $sha' to test the current head"
+              exit 1
+            fi
+            if [[ $sha != "${BASH_REMATCH[1]}"* ]]; then
+              echo "::error::the head is $sha, not ${BASH_REMATCH[1]}; review it and comment '/e2e $sha'"
+              exit 1
+            fi
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "branch=$branch" >> "$GITHUB_OUTPUT"

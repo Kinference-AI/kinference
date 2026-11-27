@@ -155,8 +155,10 @@ Closes #104.
 The end-to-end suite runs in a separate repository and reports as the
 `e2e` check on the pull request. A pull request from a branch in this
 repository starts the suite on every push. A pull request from a fork
-starts the suite when a maintainer comments `/e2e` on it. Each new push
-to a fork needs a new `/e2e` comment.
+starts the suite when a maintainer comments `/e2e <sha>` on it, where
+`<sha>` is the head commit that the maintainer reviewed, at least seven
+characters long. The suite refuses to start when the head has moved. Each
+new push to a fork needs a new comment.
 
 ## Policy on Generative AI & LLM-Assisted Contributions ##
 
