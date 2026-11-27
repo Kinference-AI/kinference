@@ -448,13 +448,13 @@ fn rank(rank: &Rank, mut candidates: Vec<Candidate>, tie_break: &[TieBreak]) -> 
     let best_first = match rank {
         Rank::MinimizePredictedTtft | Rank::MinimizeEstimatedTtft => {
             // No value sorts last, so an unobserved provider is chosen only when
-            // nothing better is standing.
-            let key = |c: &Candidate| c.objective_ms(rank).unwrap_or(f32::INFINITY);
-            candidates.sort_by(|a, b| {
-                key(a)
-                    .partial_cmp(&key(b))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            // nothing better is standing. NaN does too, so the order is total.
+            let key = |c: &Candidate| {
+                c.objective_ms(rank)
+                    .filter(|v| !v.is_nan())
+                    .unwrap_or(f32::INFINITY)
+            };
+            candidates.sort_by(|a, b| key(a).total_cmp(&key(b)));
             let best = key(&candidates[0]);
             candidates.iter().take_while(|c| key(c) == best).count()
         }

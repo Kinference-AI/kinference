@@ -111,6 +111,33 @@ fn higher_overlap_wins() {
     assert_eq!(picked.worker.endpoint, "hot:1");
 }
 
+/// A worker whose predicted wait is NaN never wins.
+#[test]
+fn a_nan_prediction_never_wins() {
+    // A zero penalty times an infinite usage is NaN.
+    let predictor = PredictorConfig {
+        cache_pressure_penalty_ms: 0.0,
+        ..Default::default()
+    };
+    let picker = PickerConfig {
+        top_k_min: 1,
+        top_k_fraction: 0.0,
+        ..Default::default()
+    };
+    let mut workers: Vec<WorkerScore> = (0..40)
+        .map(|i| make_worker(&format!("nan:{i}"), 0, 10, 0, 0.0, f32::INFINITY))
+        .collect();
+    workers.insert(20, make_worker("ok:1", 0, 10, 0, 0.0, 0.0));
+    let inflight = zero_inflight(&workers);
+    let workload = zero_workload(&workers);
+    let kv = zero_kv_blocks(&workers);
+    let picked = pick_endpoint(&inputs(
+        &workers, &predictor, &picker, &inflight, &workload, &kv,
+    ))
+    .expect("non-empty input picks");
+    assert_eq!(picked.worker.endpoint, "ok:1");
+}
+
 #[test]
 fn cold_tie_with_top_k_min_1_still_spreads() {
     // With top_k_min=1 and identical workers, plain argmin would always

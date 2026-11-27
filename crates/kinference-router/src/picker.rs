@@ -190,6 +190,12 @@ pub fn scale_per_dispatch_by_progress(
         .collect()
 }
 
+/// A predicted wait that ranks: NaN becomes infinite, so it sorts after every
+/// real wait, falls outside the tie pool and never wins.
+fn nan_last(ms: f32) -> f32 {
+    if ms.is_nan() { f32::INFINITY } else { ms }
+}
+
 /// Predicted wait (ms) for sending this prompt to worker `w`; see
 /// [`WaitPrediction`] for the terms:
 ///
@@ -453,7 +459,7 @@ pub fn pick_endpoint<'a>(inputs: &PickInputs<'a>) -> Option<PickResult<'a>> {
         .map(|(i, w)| {
             (
                 i,
-                predicted_wait_ms(w, predictor, &inflight_workload[i], now).total_ms(),
+                nan_last(predicted_wait_ms(w, predictor, &inflight_workload[i], now).total_ms()),
             )
         })
         .collect();
@@ -462,7 +468,7 @@ pub fn pick_endpoint<'a>(inputs: &PickInputs<'a>) -> Option<PickResult<'a>> {
     // `effective_k` plus anything tied at the cutoff, and pick uniformly.
     // Without the tie extension, a cold fleet with identical predictions
     // would send every request to the first worker.
-    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| a.1.total_cmp(&b.1));
     let n = scored.len();
     let effective_k = std::cmp::max(
         picker.top_k_min as usize,
@@ -597,7 +603,7 @@ fn cache_replication_override(
         .enumerate()
         .filter(|(i, w)| !is_warm(*i, raw_kv(*i)) && !is_warm(*i, w.matched_blocks))
         .map(|(i, _)| (i, predicted_of(i)))
-        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        .min_by(|a, b| a.1.total_cmp(&b.1));
     let Some((cand_idx, cand_ms)) = cheapest_candidate else {
         return chosen_idx;
     };
