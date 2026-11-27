@@ -15,6 +15,29 @@ fn rewrite_model_replaces_the_model_and_preserves_everything_else() {
     assert_eq!(v["messages"][0]["content"], "hi");
 }
 
+/// The rewrite keeps the client's key order, including inside a JSON schema.
+#[test]
+fn rewrite_model_preserves_key_order() {
+    let body = br#"{"stream":false,"model":"a","response_format":{"type":"json_schema","json_schema":{"schema":{"properties":{"reasoning":{},"answer":{}}}}}}"#;
+    let out = rewrite_model(body, "b").expect("a JSON object rewrites");
+    assert_eq!(
+        std::str::from_utf8(&out).unwrap(),
+        r#"{"stream":false,"model":"b","response_format":{"type":"json_schema","json_schema":{"schema":{"properties":{"reasoning":{},"answer":{}}}}}}"#
+    );
+}
+
+/// The pick-time mutations keep existing keys in place and append new ones.
+#[test]
+fn pick_body_mutations_preserve_key_order() {
+    let mut obj: Value =
+        serde_json::from_str(r#"{"stream":true,"zeta":1,"model":"auto","alpha":2}"#).unwrap();
+    assert!(apply_pick_body_mutations(&mut obj, Some("m")));
+    assert_eq!(
+        serde_json::to_string(&obj).unwrap(),
+        r#"{"stream":true,"zeta":1,"model":"m","alpha":2,"stream_options":{"include_usage":true}}"#
+    );
+}
+
 /// A body we cannot parse is left alone; the caller refuses the request.
 #[test]
 fn rewrite_model_refuses_a_non_object_body() {
