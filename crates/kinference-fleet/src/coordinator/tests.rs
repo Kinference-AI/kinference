@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::discovery::DiscoveryTask;
-use crate::pool::{test_pool, test_spec};
+use crate::pool::{test_pool, test_pool_with_block_size, test_spec};
 use crate::scrape::MetricsSample;
 
 struct Harness {
@@ -9,13 +9,14 @@ struct Harness {
     metrics: Arc<MetricsRegistry>,
     models: Arc<ModelIndex>,
     process: CancellationToken,
+    inbox: Inbox,
 }
 
 fn harness() -> Harness {
     let metrics = Arc::new(MetricsRegistry::new());
     let models = Arc::new(ModelIndex::new());
     let process = CancellationToken::new();
-    let (coordinator, _inbox) = Coordinator::new(
+    let (coordinator, inbox) = Coordinator::new(
         Handles {
             cancel: process.clone(),
             // Announces nothing and waits for cancellation.
@@ -38,6 +39,7 @@ fn harness() -> Harness {
         metrics,
         models,
         process,
+        inbox,
     }
 }
 
@@ -71,6 +73,13 @@ fn owner_of(c: &Coordinator, num: u64) -> Option<PoolId> {
     c.worker_pool.get(&num).map(|p| p.value().id)
 }
 
+fn discovery_token(c: &Coordinator, pool: &Pool) -> CancellationToken {
+    c.discovery_tokens
+        .get(&pool.id)
+        .map(|t| t.value().clone())
+        .expect("discovery token stored")
+}
+
 /// Adding a worker makes it routable by its model hint before any scrape.
 #[tokio::test]
 async fn add_makes_the_worker_routable_by_its_hint() {
@@ -101,6 +110,22 @@ async fn a_second_pool_cannot_claim_an_owned_worker() {
     assert!(a.registry.lookup(1).is_some());
     assert_eq!(owner_of(&h.coordinator, 1), Some(a.id));
     assert_eq!(h.models.pools_for("llama"), vec![a.id]);
+}
+
+/// A duplicate Added from the owning pool keeps the worker's owner entry
+/// and its tasks.
+#[tokio::test]
+async fn a_duplicate_add_keeps_the_owner() {
+    let h = harness();
+    let pool = test_pool("a");
+    h.coordinator.add_worker(&pool, worker(1, "llama"));
+    let token = token_for(&h.coordinator, &pool, 1).expect("token stored");
+
+    h.coordinator.add_worker(&pool, worker(1, "llama"));
+
+    assert_eq!(owner_of(&h.coordinator, 1), Some(pool.id));
+    assert!(!token.is_cancelled());
+    assert!(pool.registry.lookup(1).is_some());
 }
 
 /// A declared model list seeds the worker and marks it ready without a
@@ -223,4 +248,48 @@ async fn retire_stops_discovery_and_drops_every_worker() {
         assert_eq!(owner_of(&h.coordinator, num), None);
     }
     assert!(!pool.cancel.is_cancelled(), "the reaper cancels the pool");
+}
+
+/// An Added that a pool queued before it retired doesn't register the
+/// worker, so the replacement pool can claim it.
+#[tokio::test]
+async fn a_retired_pool_queued_add_does_not_claim_the_worker() {
+    let h = harness();
+    let old = test_pool_with_block_size("a", 16);
+    let new = test_pool_with_block_size("a", 32);
+    h.coordinator
+        .on_create(&old, &test_spec("a", 16))
+        .expect("discovery starts");
+    let stale = discovery_token(&h.coordinator, &old);
+    h.coordinator
+        .coord_tx
+        .send((old.clone(), stale, WorkerChange::Added(worker(1, "llama"))))
+        .await
+        .expect("inbox open");
+
+    h.coordinator.on_retire(&old);
+    h.coordinator
+        .on_create(&new, &test_spec("a", 32))
+        .expect("discovery starts");
+    let live = discovery_token(&h.coordinator, &new);
+    h.coordinator
+        .coord_tx
+        .send((new.clone(), live, WorkerChange::Added(worker(1, "llama"))))
+        .await
+        .expect("inbox open");
+    let run = tokio::spawn(h.coordinator.clone().run(h.inbox));
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while owner_of(&h.coordinator, 1).is_none() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("a pool claims the worker");
+    run.abort();
+
+    assert_eq!(owner_of(&h.coordinator, 1), Some(new.id));
+    assert!(new.registry.lookup(1).is_some());
+    assert!(old.registry.lookup(1).is_none());
+    assert!(token_for(&h.coordinator, &old, 1).is_none());
 }
